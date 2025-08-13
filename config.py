@@ -1,0 +1,4 @@
+DB_HOST = "192.168.2.44"
+DB_USER = "root"
+DB_PASSWORD = "0907986078bao"
+DB_NAME = "chat_app"
