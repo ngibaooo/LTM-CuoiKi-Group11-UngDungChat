@@ -83,16 +83,21 @@ class ChatApp(tk.Tk):
         self.event_q = queue.Queue()
 
         # state
-        self.username = None
+        self.username = None                  # ID đăng nhập của chính mình
         self.main_ui_built = False
+        # friends: dict[id] = {"online": bool, "full_name": str or None}
         self.friends = {}
-        self.incoming = []
-        self.outgoing = []
+        self.incoming = []                    # danh sách id đang mời mình
+        self.outgoing = []                    # danh sách id mình đã mời
         self.rooms = []
         self.current_chat = None
         self.history = {}
         self.unread = {}
         self.images_cache = []
+
+        # mapping hiển thị
+        self.friend_index = []                # listbox index -> friend id
+        self.search_index = []                # listbox index -> search result id
 
         # containers
         self.login_frame = None
@@ -123,20 +128,22 @@ class ChatApp(tk.Tk):
 
         # login
         self.l_user = tk.StringVar(); self.l_pass = tk.StringVar()
-        ttk.Label(self.tab_login, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(self.tab_login, text="ID đăng nhập").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         ent_u = ttk.Entry(self.tab_login, textvariable=self.l_user, width=30); ent_u.grid(row=0, column=1, padx=6, pady=6)
-        ttk.Label(self.tab_login, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(self.tab_login, text="Mật khẩu").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         ent_p = ttk.Entry(self.tab_login, textvariable=self.l_pass, show="•", width=30); ent_p.grid(row=1, column=1, padx=6, pady=6)
         ttk.Button(self.tab_login, text="Đăng nhập", command=self.do_login).grid(row=2, column=0, columnspan=2, pady=10)
         ent_u.bind("<Return>", lambda e: self.do_login()); ent_p.bind("<Return>", lambda e: self.do_login())
 
         # register
-        self.r_user = tk.StringVar(); self.r_pass = tk.StringVar()
-        ttk.Label(self.tab_register, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_register, textvariable=self.r_user, width=30).grid(row=0, column=1, padx=6, pady=6)
-        ttk.Label(self.tab_register, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_register, textvariable=self.r_pass, show="•", width=30).grid(row=1, column=1, padx=6, pady=6)
-        ttk.Button(self.tab_register, text="Tạo tài khoản", command=self.do_register).grid(row=2, column=0, columnspan=2, pady=10)
+        self.r_name = tk.StringVar(); self.r_user = tk.StringVar(); self.r_pass = tk.StringVar()
+        ttk.Label(self.tab_register, text="Họ tên").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_register, textvariable=self.r_name, width=30).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(self.tab_register, text="ID đăng nhập").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_register, textvariable=self.r_user, width=30).grid(row=1, column=1, padx=6, pady=6)
+        ttk.Label(self.tab_register, text="Mật khẩu").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_register, textvariable=self.r_pass, show="•", width=30).grid(row=2, column=1, padx=6, pady=6)
+        ttk.Button(self.tab_register, text="Tạo tài khoản", command=self.do_register).grid(row=3, column=0, columnspan=2, pady=10)
 
         self.status_lbl = ttk.Label(self.login_frame, text="", foreground="#666"); self.status_lbl.pack()
 
@@ -145,16 +152,22 @@ class ChatApp(tk.Tk):
             self.status_lbl.configure(text=text)
 
     def do_register(self):
-        u = self.r_user.get().strip(); p = self.r_pass.get()
-        if not u or not p: self.set_status("Nhập đủ thông tin đăng ký."); return
+        name = self.r_name.get().strip()
+        u = self.r_user.get().strip()
+        p = self.r_pass.get()
+        if not name or not u or not p:
+            self.set_status("Nhập đủ Họ tên, ID và Mật khẩu.")
+            return
         try:
-            self.net.connect(); self.net.send("register", {"username": u, "password": p})
+            self.net.connect()
+            # GỬI full_name kèm username & password
+            self.net.send("register", {"username": u, "password": p, "full_name": name})
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
 
     def do_login(self):
         u = self.l_user.get().strip(); p = self.l_pass.get()
-        if not u or not p: self.set_status("Nhập username & password."); return
+        if not u or not p: self.set_status("Nhập ID & mật khẩu."); return
         try:
             self.net.connect(); self.net.send("login", {"username": u, "password": p})
         except Exception as e:
@@ -183,18 +196,18 @@ class ChatApp(tk.Tk):
         fr_controls = ttk.Frame(left); fr_controls.grid(row=1, column=0, sticky="ew", pady=4)
         ttk.Button(fr_controls, text="Thêm bạn", command=self.ui_add_friend).pack(side="left", padx=2)
         ttk.Button(fr_controls, text="Yêu cầu", command=self.ui_show_requests).pack(side="left", padx=2)
-        ttk.Button(fr_controls, text="Đăng xuất", command=self.ui_logout).pack(side="right", padx=2)  # NÚT ĐĂNG XUẤT
+        ttk.Button(fr_controls, text="Đăng xuất", command=self.ui_logout).pack(side="right", padx=2)
 
         room_controls = ttk.Frame(left); room_controls.grid(row=2, column=0, sticky="ew", pady=4)
         ttk.Button(room_controls, text="Tạo phòng", command=self.ui_create_room).pack(side="left", padx=2)
         ttk.Button(room_controls, text="Tham gia phòng", command=self.ui_join_room).pack(side="left", padx=2)
 
-        # search users by username
+        # search users by login ID
         search_controls = ttk.Frame(left); search_controls.grid(row=3, column=0, sticky="ew", pady=4)
         self.search_user_var = tk.StringVar()
         ent = ttk.Entry(search_controls, textvariable=self.search_user_var, width=18); ent.pack(side="left", padx=2)
         ent.bind("<Return>", lambda e: self.ui_search_users())
-        ttk.Button(search_controls, text="Tìm username", command=self.ui_search_users).pack(side="left", padx=2)
+        ttk.Button(search_controls, text="Tìm theo ID", command=self.ui_search_users).pack(side="left", padx=2)
 
         self.nb_left = ttk.Notebook(left); self.tab_friends = ttk.Frame(self.nb_left); self.tab_rooms = ttk.Frame(self.nb_left)
         self.nb_left.add(self.tab_friends, text="Bạn bè"); self.nb_left.add(self.tab_rooms, text="Phòng")
@@ -255,9 +268,10 @@ class ChatApp(tk.Tk):
         self.history = {}
         self.unread = {}
         self.images_cache = []
+        self.friend_index = []
+        self.search_index = []
 
     def reset_to_login(self):
-        # đóng kết nối cũ (nếu muốn giữ kết nối, có thể bỏ close())
         self.net.close()
         self.destroy_main_container()
         self.reset_state()
@@ -265,17 +279,17 @@ class ChatApp(tk.Tk):
 
     # ---- UI actions ----
     def ui_logout(self):
-        # Gửi yêu cầu logout, chờ server trả về sự kiện 'logout' để reset UI.
         try:
             self.net.send("logout", {})
         except Exception:
-            # nếu socket hỏng, cứ quay lại login
             self.reset_to_login()
 
     def on_friend_select(self, _):
         sel = self.friends_list.curselection()
         if not sel: return
-        uname = self.friends_list.get(sel[0]).split(" ")[0]
+        idx = sel[0]
+        if idx < 0 or idx >= len(self.friend_index): return
+        uname = self.friend_index[idx]
         self.open_chat("dm", uname)
 
     def on_room_select(self, _):
@@ -286,7 +300,9 @@ class ChatApp(tk.Tk):
 
     def open_chat(self, kind, name):
         self.current_chat = (kind, name)
-        self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {name}")
+        # tiêu đề hiển thị họ tên nếu có
+        display = self.friends.get(name, {}).get("full_name") if (kind == "dm") else name
+        self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {display or name}")
         cid = self.chat_id(kind, name)
         self.unread[cid] = 0
         self.refresh_lists()
@@ -297,7 +313,7 @@ class ChatApp(tk.Tk):
 
     def ui_add_friend(self):
         top = tk.Toplevel(self); top.title("Thêm bạn")
-        tk.Label(top, text="Nhập username:").pack(padx=8, pady=8)
+        tk.Label(top, text="Nhập **ID đăng nhập** của bạn muốn kết bạn:").pack(padx=8, pady=8)
         v = tk.StringVar()
         e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
         def ok():
@@ -310,14 +326,14 @@ class ChatApp(tk.Tk):
     def ui_show_requests(self):
         top = tk.Toplevel(self); top.title("Yêu cầu kết bạn")
         frm = ttk.Frame(top); frm.pack(padx=8, pady=8)
-        ttk.Label(frm, text="Đang chờ bạn chấp nhận:").grid(row=0, column=0, sticky="w")
-        lb_in = tk.Listbox(frm, width=24, height=8); lb_in.grid(row=1, column=0, padx=4, pady=4)
+        ttk.Label(frm, text="Đang chờ bạn chấp nhận (ID):").grid(row=0, column=0, sticky="w")
+        lb_in = tk.Listbox(frm, width=28, height=8); lb_in.grid(row=1, column=0, padx=4, pady=4)
         for u in self.incoming: lb_in.insert("end", u)
         ttk.Button(frm, text="Chấp nhận", command=lambda: self._act_req(lb_in, True)).grid(row=2, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(frm, text="Từ chối", command=lambda: self._act_req(lb_in, False)).grid(row=3, column=0, sticky="ew", padx=2, pady=2)
 
-        ttk.Label(frm, text="Bạn đã gửi (chờ bên kia duyệt):").grid(row=0, column=1, sticky="w")
-        lb_out = tk.Listbox(frm, width=24, height=8); lb_out.grid(row=1, column=1, padx=4, pady=4)
+        ttk.Label(frm, text="Bạn đã gửi (chờ đối phương duyệt) (ID):").grid(row=0, column=1, sticky="w")
+        lb_out = tk.Listbox(frm, width=28, height=8); lb_out.grid(row=1, column=1, padx=4, pady=4)
         for u in self.outgoing: lb_out.insert("end", u)
         ttk.Button(frm, text="Đóng", command=top.destroy).grid(row=4, column=0, columnspan=2, pady=6)
 
@@ -353,6 +369,7 @@ class ChatApp(tk.Tk):
         ttk.Button(top, text="Tham gia", command=ok).pack(padx=8, pady=8)
 
     def ui_search_users(self):
+        # tìm theo ID
         q = self.search_user_var.get().strip()
         self.net.send("search_users", {"query": q})
 
@@ -399,7 +416,17 @@ class ChatApp(tk.Tk):
             who = m.get("from"); ts = (m.get("ts","")[:19]).replace("T"," ")
             left = (who != self.username)
             b = ttk.Frame(self.msg_frame); b.pack(anchor="w" if left else "e", fill="x", pady=2, padx=8)
-            ttk.Label(b, text=f"{who} • {ts}", foreground="#555").pack(anchor="w" if left else "e")
+            # Hàng tiêu đề: nếu PM thì hiển thị theo họ tên người gửi (nếu có)
+            show_name = who
+            if self.current_chat and self.current_chat[0] == "dm":
+                # dm với 1 người: chỉ hiện tên người gửi nếu là đối phương
+                if left:
+                    show_name = self.friends.get(who, {}).get("full_name") or who
+            else:
+                # room: thử map họ tên nếu là bạn bè
+                show_name = self.friends.get(who, {}).get("full_name") or who
+
+            ttk.Label(b, text=f"{show_name} • {ts}", foreground="#555").pack(anchor="w" if left else "e")
             mt = m.get("msgtype")
             if mt == "text":
                 t = tk.Text(b, height=2, wrap="word", relief="flat", bg="#f6f6f6")
@@ -432,13 +459,22 @@ class ChatApp(tk.Tk):
         messagebox.showinfo("Lưu file", f"Đã lưu: {path}")
 
     def refresh_lists(self):
+        # Cập nhật list bạn bè hiển thị HỌ TÊN (nếu có)
         if self.friends_list and self.friends_list.winfo_exists():
             self.friends_list.delete(0, "end")
-            for u in sorted(self.friends.keys()):
-                dot = "🟢" if self.friends[u] else "⚫"
-                cid = self.chat_id("dm", u)
+            self.friend_index = []
+            # sắp xếp theo tên hiển thị
+            def display_name(uid):
+                return (self.friends.get(uid, {}).get("full_name") or uid).lower()
+            for uid in sorted(self.friends.keys(), key=display_name):
+                info = self.friends[uid]
+                name = info.get("full_name") or uid
+                dot = "🟢" if info.get("online") else "⚫"
+                cid = self.chat_id("dm", uid)
                 badge = f"  ({self.unread.get(cid,0)})" if self.unread.get(cid,0) else ""
-                self.friends_list.insert("end", f"{u} {dot}{badge}")
+                self.friends_list.insert("end", f"{name} {dot}{badge}")
+                self.friend_index.append(uid)
+
         if self.rooms_list and self.rooms_list.winfo_exists():
             self.rooms_list.delete(0, "end")
             for r in sorted(self.rooms):
@@ -476,7 +512,6 @@ class ChatApp(tk.Tk):
             return
 
         if t == "logout":
-            # server confirm -> reset về màn hình đăng nhập
             self.reset_to_login()
             return
 
@@ -484,7 +519,22 @@ class ChatApp(tk.Tk):
         self.ensure_main_ui()
 
         if t == "friend_list":
-            self.friends = {f["username"]: bool(f["online"]) for f in obj.get("friends", [])}
+            # chấp nhận cả 2 dạng:
+            # 1) [{"username": "...", "full_name": "...", "online": true}, ...]
+            # 2) [{"username": "...", "online": true}, ...]  hoặc ["id1","id2",...]
+            self.friends = {}
+            raw = obj.get("friends", [])
+            for item in raw:
+                if isinstance(item, dict):
+                    uid = item.get("username")
+                    if not uid: continue
+                    self.friends[uid] = {
+                        "online": bool(item.get("online")),
+                        "full_name": item.get("full_name") or item.get("name")
+                    }
+                else:
+                    uid = str(item)
+                    self.friends[uid] = {"online": False, "full_name": None}
             self.incoming = obj.get("incoming", [])
             self.outgoing = obj.get("outgoing", [])
             self.refresh_lists()
@@ -519,7 +569,7 @@ class ChatApp(tk.Tk):
         if t == "presence":
             u = obj.get("user"); on = bool(obj.get("online"))
             if u in self.friends:
-                self.friends[u] = on
+                self.friends[u]["online"] = on
                 self.refresh_lists()
             return
 
@@ -557,20 +607,36 @@ class ChatApp(tk.Tk):
             return
 
         if t == "search_users":
+            # Server có thể trả:
+            # - list[str] các ID
+            # - list[dict]: {"username": "...", "full_name": "..."}
             res = obj.get("results", [])
-            top = tk.Toplevel(self); top.title("Kết quả tìm kiếm username")
-            lb = tk.Listbox(top, width=30, height=12); lb.pack(padx=8, pady=8)
-            for u in res:
-                if u != self.username:
-                    lb.insert("end", u)
-            ttk.Button(top, text="Gửi lời mời", command=lambda: self._req_from_list(lb, top)).pack(pady=6)
+            top = tk.Toplevel(self); top.title("Kết quả tìm kiếm (theo ID)")
+            lb = tk.Listbox(top, width=40, height=12); lb.pack(padx=8, pady=8)
+            self.search_index = []
+            for it in res:
+                if isinstance(it, dict):
+                    uid = it.get("username")
+                    if uid and uid != self.username:
+                        name = it.get("full_name") or it.get("name") or ""
+                        text = f"{name} — {uid}" if name else uid
+                        lb.insert("end", text)
+                        self.search_index.append(uid)
+                else:
+                    uid = str(it)
+                    if uid != self.username:
+                        lb.insert("end", uid)
+                        self.search_index.append(uid)
+            ttk.Button(top, text="Gửi lời mời", command=lambda: self._req_from_search(lb, top)).pack(pady=6)
             return
 
-    def _req_from_list(self, lb, top):
+    def _req_from_search(self, lb, top):
         sel = lb.curselection()
         if not sel: return
-        u = lb.get(sel[0])
-        self.net.send("friend_request", {"to": u})
+        idx = sel[0]
+        if idx < 0 or idx >= len(self.search_index): return
+        uid = self.search_index[idx]
+        self.net.send("friend_request", {"to": uid})
         top.destroy()
 
 # --------------- run ---------------
