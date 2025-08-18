@@ -188,10 +188,10 @@ class ChatServer:
             self.online[u] = sock
             self.sock2user[sock] = u
 
-        # ACK nhanh
+        # GỬI ACK ngay (cảm giác nhanh)
         json_send(sock, {"type": "login", "ok": True, "username": u, "ts": now_iso()})
 
-        # Gửi offline queue
+        # Gửi queue offline nếu có
         with LOCK:
             q = info.get("offline_queue", [])
             for item in q:
@@ -224,7 +224,7 @@ class ChatServer:
         substr = [u for u in self.users if q in u.lower() and u not in exact and u not in prefix]
         return {"type": "search_users", "ok": True, "results": (exact + prefix + substr)[:50]}
 
-    # --- FRIEND REQUESTS (Realtime) ---
+    # --- FRIEND REQUESTS (Realtime ưu tiên) ---
     def handle_friend_request(self, sock, p):
         me = self.sock2user.get(sock)
         to_user = (p.get("to") or "").strip()
@@ -237,16 +237,20 @@ class ChatServer:
             info_to = self.users[to_user]
             if to_user in info_me["friends"]:
                 return {"type": "friend_request", "ok": False, "error": "Đã là bạn"}
-            if me not in info_to["incoming"]:
+            if me in info_to["incoming"] or to_user in info_me["outgoing"]:
+                # đã gửi rồi thì báo ok để idempotent
+                pass
+            else:
                 info_me["outgoing"].add(to_user)
                 info_to["incoming"].add(me)
                 self.save_data()
 
-        # phản hồi ngay cho người gửi
+        # Trả lời NGAY cho người gửi
         json_send(sock, {"type": "friend_request", "ok": True, "message": "Đã gửi lời mời", "ts": now_iso()})
+        # Cập nhật friend list người gửi
         self.emit_friend_list(me)
 
-        # đẩy thông báo ngay cho người nhận + cập nhật danh sách
+        # ĐẨY THÔNG BÁO NGAY cho người nhận + cập nhật friend list
         s = self.online.get(to_user)
         if s:
             json_send(s, {"type": "friend_request", "from": me, "ts": now_iso()})
@@ -272,11 +276,11 @@ class ChatServer:
             else:
                 return {"type": "friend_accept", "ok": False, "error": "Không có lời mời"}
 
-        # cập nhật danh sách hai bên ngay
+        # CẬP NHẬT FRIEND LIST HAI BÊN NGAY
         self.emit_friend_list(me)
         self.emit_friend_list(from_user)
 
-        # báo cho bên kia
+        # Thông báo cho bên kia để refresh UI tức thì
         s_from = self.online.get(from_user)
         if s_from:
             json_send(s_from, {"type": "friend_accept", "from": me, "ok": True, "ts": now_iso()})
@@ -300,7 +304,7 @@ class ChatServer:
             json_send(s_from, {"type": "friend_decline", "from": me, "ok": True, "ts": now_iso()})
         return {"type": "friend_decline", "ok": True}
 
-    # --- ROOMS / MESSAGES (cốt lõi để test) ---
+    # --- ROOMS / MESSAGES (giữ nguyên tối thiểu để test) ---
     def handle_create_room(self, sock, p):
         me = self.sock2user.get(sock)
         room = (p.get("room") or "").strip()
@@ -407,11 +411,9 @@ class ChatServer:
         try:
             for obj in json_lines(fp):
                 typ = obj.get("type"); p = obj.get("payload", {})
-                # realtime ưu tiên
+                # Ưu tiên realtime:
                 if typ == "login":
                     self.handle_login(sock, p)
-                elif typ == "logout":
-                    self.handle_logout(sock); json_send(sock, {"type": "logout", "ok": True})
                 elif typ == "friend_request":
                     self.handle_friend_request(sock, p)
                 elif typ == "friend_accept":
@@ -420,6 +422,8 @@ class ChatServer:
                     json_send(sock, self.handle_friend_decline(sock, p))
                 elif typ == "register":
                     json_send(sock, self.handle_register(sock, p))
+                elif typ == "logout":
+                    self.handle_logout(sock); json_send(sock, {"type": "logout", "ok": True})
                 elif typ == "search_users":
                     json_send(sock, self.handle_search_users(sock, p))
                 elif typ == "create_room":
