@@ -1,151 +1,184 @@
 import socket
 import threading
-import mysql.connector
+import json
 from database import get_connection
-from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 
-# Function to handle user registration
-def register_user(username, password, display_name, email, avatar):
+HOST = "127.0.0.1"
+PORT = 5000
+
+clients = {}  # conn -> user_id
+
+# ------------------- Xử lý DB -------------------
+def register_user(username, password, display_name, email=None, avatar=None):
     conn = get_connection()
     if conn:
-        cursor = conn.cursor()
         try:
-            cursor.execute("INSERT INTO USERS (Username, Password, Display_name, Status, Email, Avatar) VALUES (%s, %s, %s, %s, %s, %s)", 
-                           (username, password, display_name, 'offline', email, avatar))
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO USERS (Username, Password, Display_name, Status, Email, Avatar)
+                VALUES (%s, %s, %s, 'offline', %s, %s)
+            """, (username, password, display_name, email, avatar))
             conn.commit()
-            return True
-        except mysql.connector.Error as err:
-            print(f"Error: {err}")
-            return False
+            return True, "Đăng ký thành công!"
+        except Exception as e:
+            return False, str(e)
         finally:
-            cursor.close()
             conn.close()
-    return False
+    return False, "DB không kết nối được."
 
-# Function to handle user login
 def login_user(username, password):
     conn = get_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT Id, Password FROM USERS WHERE Username = %s", (username,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        if user and user[1] == password:
-            return user[0]  # Return user ID on success
-    return None
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM USERS WHERE Username=%s AND Password=%s", (username, password))
+            user = cursor.fetchone()
+            if user:
+                cursor.execute("UPDATE USERS SET Status='online' WHERE Id=%s", (user["Id"],))
+                conn.commit()
+                return True, user
+            return False, "Sai username hoặc password."
+        finally:
+            conn.close()
+    return False, "DB không kết nối được."
 
-# Function to send a message
-def send_message(sender_id, receiver_id, room_id, content):
+def logout_user(user_id):
     conn = get_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO MESSAGES (Sender_id, Receive_id, Room_id, Content, Status) VALUES (%s, %s, %s, %s, %s)",
-                       (sender_id, receiver_id, room_id, content, 'sent'))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    return False
+        try:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE USERS SET Status='offline' WHERE Id=%s", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
-# Function to create a chat room
-def create_chat_room(creator_id, room_name):
+def create_room(room_name, user_id):
     conn = get_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO CHAT_ROOM (Room_name, Created_by) VALUES (%s, %s)", (room_name, creator_id))
-        conn.commit()
-        room_id = cursor.lastrowid
-        cursor.close()
-        conn.close()
-        return room_id
-    return None
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO CHAT_ROOM (Room_name, Created_by) VALUES (%s, %s)", (room_name, user_id))
+            conn.commit()
+            # add creator as admin
+            cursor.execute("SELECT Id FROM CHAT_ROOM WHERE Room_name=%s", (room_name,))
+            room_id = cursor.fetchone()[0]
+            cursor.execute("INSERT INTO ROOM_MEMBER (Room_id, User_id, Role) VALUES (%s, %s, 'admin')", (room_id, user_id))
+            conn.commit()
+            return True, "Tạo phòng thành công!"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
+    return False, "DB không kết nối được."
 
-# Function to join a chat room
-def join_chat_room(user_id, room_id):
+def join_room(room_id, user_id):
     conn = get_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO ROOM_MEMBER (Room_id, User_id, Role) VALUES (%s, %s, %s)", 
-                       (room_id, user_id, 'member'))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    return False
+        try:
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO ROOM_MEMBER (Room_id, User_id, Role) VALUES (%s, %s, 'member')", (room_id, user_id))
+            conn.commit()
+            return True, "Tham gia phòng thành công!"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
+    return False, "DB không kết nối được."
 
-# Function to handle client communication
-def handle_client(client_socket, client_address):
-    print(f"New connection from {client_address}")
+def save_message(sender_id, content, room_id=None, receive_id=None):
+    conn = get_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO MESSAGES (Sender_id, Receive_id, Room_id, Content, Status, Send_at)
+                VALUES (%s, %s, %s, %s, 'sent', NOW())
+            """, (sender_id, receive_id, room_id, content))
+            conn.commit()
+        except Exception as e:
+            print("Lỗi lưu tin nhắn:", e)
+        finally:
+            conn.close()
+
+# ------------------- Xử lý Client -------------------
+def handle_client(conn, addr):
+    print(f"[KẾT NỐI] {addr}")
+    user_id = None
     try:
         while True:
-            # Receive client message
-            message = client_socket.recv(1024).decode('utf-8')
-            if not message:
+            data = conn.recv(4096).decode("utf-8")
+            if not data:
                 break
+            try:
+                request = json.loads(data)
+            except:
+                conn.sendall(json.dumps({"status": False, "msg": "Sai format JSON"}).encode("utf-8"))
+                continue
 
-            # Process message (e.g., registration, login, sending messages)
-            command, *args = message.split(',')
+            action = request.get("action")
+            response = {}
 
-            if command == 'REGISTER':
-                # Registration format: REGISTER,username,password,display_name,email,avatar
-                username, password, display_name, email, avatar = args
-                if register_user(username, password, display_name, email, avatar):
-                    client_socket.send("Registration successful!".encode())
+            if action == "register":
+                ok, msg = register_user(request["username"], request["password"], request["display_name"],
+                                        request.get("email"), request.get("avatar"))
+                response = {"status": ok, "msg": msg}
+
+            elif action == "login":
+                ok, result = login_user(request["username"], request["password"])
+                if ok:
+                    user_id = result["Id"]
+                    clients[conn] = user_id
+                    response = {"status": True, "msg": "Đăng nhập thành công!", "user": result}
                 else:
-                    client_socket.send("Registration failed!".encode())
+                    response = {"status": False, "msg": result}
 
-            elif command == 'LOGIN':
-                # Login format: LOGIN,username,password
-                username, password = args
-                user_id = login_user(username, password)
+            elif action == "logout":
                 if user_id:
-                    client_socket.send(f"Login successful! User ID: {user_id}".encode())
-                else:
-                    client_socket.send("Login failed!".encode())
+                    logout_user(user_id)
+                    response = {"status": True, "msg": "Đăng xuất thành công"}
+                    break
 
-            elif command == 'SEND_MESSAGE':
-                # Send message format: SEND_MESSAGE,sender_id,receiver_id,room_id,message
-                sender_id, receiver_id, room_id, message = map(int, args[:3]) + [args[3]]
-                if send_message(sender_id, receiver_id, room_id, message):
-                    client_socket.send("Message sent!".encode())
-                else:
-                    client_socket.send("Message failed!".encode())
+            elif action == "create_room":
+                ok, msg = create_room(request["room_name"], user_id)
+                response = {"status": ok, "msg": msg}
 
-            elif command == 'CREATE_ROOM':
-                # Create room format: CREATE_ROOM,creator_id,room_name
-                creator_id, room_name = map(int, args[:1]) + [args[1]]
-                room_id = create_chat_room(creator_id, room_name)
-                if room_id:
-                    client_socket.send(f"Room created! Room ID: {room_id}".encode())
-                else:
-                    client_socket.send("Room creation failed!".encode())
+            elif action == "join_room":
+                ok, msg = join_room(request["room_id"], user_id)
+                response = {"status": ok, "msg": msg}
 
-            elif command == 'JOIN_ROOM':
-                # Join room format: JOIN_ROOM,user_id,room_id
-                user_id, room_id = map(int, args)
-                if join_chat_room(user_id, room_id):
-                    client_socket.send("Joined room!".encode())
-                else:
-                    client_socket.send("Failed to join room!".encode())
+            elif action == "send_message":
+                msg = request["msg"]
+                room_id = request.get("room_id")
+                receive_id = request.get("receive_id")
+                save_message(user_id, msg, room_id, receive_id)
+                response = {"status": True, "msg": msg, "sender": user_id}
+                # broadcast cho tất cả client
+                for c in clients:
+                    if c != conn:
+                        c.sendall(json.dumps(response).encode("utf-8"))
+
+            else:
+                response = {"status": False, "msg": "Hành động không hợp lệ"}
+
+            conn.sendall(json.dumps(response).encode("utf-8"))
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Lỗi client {addr}: {e}")
     finally:
-        client_socket.close()
+        if user_id:
+            logout_user(user_id)
+            if conn in clients:
+                del clients[conn]
+        conn.close()
 
-# Function to start the server
-def start_server(host, port):
+def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((host, port))
+    server.bind((HOST, PORT))
     server.listen(5)
-    print(f"Server started on {host}:{port}")
-
+    print(f"[SERVER] Đang chạy tại {HOST}:{PORT}")
     while True:
-        client_socket, client_address = server.accept()
-        thread = threading.Thread(target=handle_client, args=(client_socket, client_address))
-        thread.start()
+        conn, addr = server.accept()
+        threading.Thread(target=handle_client, args=(conn, addr)).start()
 
-# Run the server
 if __name__ == "__main__":
-    start_server(DB_HOST, 5000)  # Assuming the server runs on port 5000
+    start_server()
