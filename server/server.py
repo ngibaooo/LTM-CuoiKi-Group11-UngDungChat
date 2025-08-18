@@ -5,7 +5,6 @@ import threading
 import json
 import os
 import hashlib
-import base64
 import datetime
 from typing import Dict, Any, List, Set, Tuple
 
@@ -14,7 +13,7 @@ PORT = 5555
 DATA_FILE = "server_data.json"
 LOCK = threading.RLock()
 
-def now_iso():
+def now_iso() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def sha256(s: str) -> str:
@@ -30,27 +29,30 @@ def json_send(sock: socket.socket, obj: Dict[str, Any]):
 def json_lines(fp):
     for line in fp:
         line = line.strip()
-        if line:
-            try:
-                yield json.loads(line)
-            except Exception:
-                continue
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except Exception:
+            continue
 
 class ChatServer:
     def __init__(self, host=HOST, port=PORT):
         self.host = host
         self.port = port
-        # Persistent state
-        self.users: Dict[str, Dict[str, Any]] = {}  # username -> {salt, pwd_hash, friends:set, rooms:set, incoming:set, outgoing:set, offline_queue:list}
-        self.rooms: Dict[str, Dict[str, Any]] = {}  # room -> {owner:str, members:set, messages:list}
-        self.dm_messages: Dict[Tuple[str,str], List[Dict[str,Any]]] = {}  # (u1,u2) sorted -> list of messages
-        # Runtime state
-        self.online: Dict[str, socket.socket] = {}  # username -> socket
+
+        # persistent
+        self.users: Dict[str, Dict[str, Any]] = {}   # username -> info
+        self.rooms: Dict[str, Dict[str, Any]] = {}
+        self.dm_messages: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+
+        # runtime
+        self.online: Dict[str, socket.socket] = {}   # username -> socket
         self.sock2user: Dict[socket.socket, str] = {}
 
         self.load_data()
 
-    # ---------- Persistence ----------
+    # ---------- persistence ----------
     def load_data(self):
         if os.path.exists(DATA_FILE):
             try:
@@ -58,8 +60,8 @@ class ChatServer:
                     data = json.load(f)
                 self.users = {}
                 for u, info in data.get("users", {}).items():
-                    info["friends"] = set(info.get("friends", []))
-                    info["rooms"] = set(info.get("rooms", []))
+                    info["friends"]  = set(info.get("friends", []))
+                    info["rooms"]    = set(info.get("rooms", []))
                     info["incoming"] = set(info.get("incoming", []))
                     info["outgoing"] = set(info.get("outgoing", []))
                     self.users[u] = info
@@ -69,8 +71,8 @@ class ChatServer:
                     self.rooms[r] = info
                 self.dm_messages = {}
                 for k, msgs in data.get("dm_messages", {}).items():
-                    u1, u2 = k.split("|||")
-                    self.dm_messages[(u1,u2)] = msgs
+                    a, b = k.split("|||")
+                    self.dm_messages[(a, b)] = msgs
             except Exception:
                 pass
 
@@ -104,68 +106,60 @@ class ChatServer:
         except Exception:
             pass
 
-    # ---------- Helpers ----------
-    def send_system(self, sock, text):
-        json_send(sock, {"type": "system", "ok": True, "message": text, "ts": now_iso()})
-
-    def broadcast_to(self, usernames: Set[str], payload: Dict[str, Any], exclude: str=None):
-        for u in list(usernames):
-            s = self.online.get(u)
-            if s and (exclude is None or u != exclude):
-                json_send(s, payload)
+    # ---------- helpers ----------
+    def dm_key(self, a: str, b: str):
+        return tuple(sorted([a, b]))
 
     def presence_update(self, username: str, online: bool):
         friends = self.users.get(username, {}).get("friends", set())
-        payload = {"type":"presence","user":username,"online":online,"ts":now_iso()}
-        self.broadcast_to(friends, payload, exclude=username)
+        payload = {"type": "presence", "user": username, "online": online, "ts": now_iso()}
+        for u in list(friends):
+            s = self.online.get(u)
+            if s:
+                json_send(s, payload)
 
     def emit_friend_list(self, username: str):
         info = self.users.get(username)
-        if not info: return
-        friends = []
-        for f in sorted(info["friends"]):
-            friends.append({"username": f, "online": (f in self.online)})
+        if not info:
+            return
+        friends = [{"username": f, "online": (f in self.online)} for f in sorted(info["friends"])]
         incoming = sorted(info["incoming"])
         outgoing = sorted(info["outgoing"])
         s = self.online.get(username)
         if s:
-            json_send(s, {"type":"friend_list","friends":friends,"incoming":incoming,"outgoing":outgoing,"ts":now_iso()})
+            json_send(s, {"type": "friend_list", "friends": friends, "incoming": incoming, "outgoing": outgoing, "ts": now_iso()})
 
-    def list_my_rooms(self, username: str):
+    def emit_room_list(self, username: str):
         info = self.users.get(username)
-        if not info: return []
-        rooms = sorted(list(info["rooms"]))
+        if not info:
+            return
+        rooms = sorted(info["rooms"])
         s = self.online.get(username)
         if s:
-            json_send(s, {"type":"room_list","rooms":rooms,"ts":now_iso()})
-        return rooms
+            json_send(s, {"type": "room_list", "rooms": rooms, "ts": now_iso()})
 
-    def dm_key(self, a: str, b: str):
-        return tuple(sorted([a,b]))
-
-    def deliver_or_queue(self, to_user: str, message_obj: Dict[str,Any]):
+    def deliver_or_queue(self, to_user: str, payload: Dict[str, Any]):
         s = self.online.get(to_user)
         if s:
-            json_send(s, {"type":"new_message","message":message_obj,"ts":now_iso()})
+            json_send(s, payload)
         else:
             uinfo = self.users.get(to_user)
             if uinfo is not None:
-                uinfo.setdefault("offline_queue", []).append({"type":"new_message","message":message_obj,"ts":now_iso()})
+                uinfo.setdefault("offline_queue", []).append(payload)
 
-    # ---------- Handlers ----------
-    def handle_register(self, sock, payload):
-        username = payload.get("username","").strip()
-        password = payload.get("password","")
-        if not username or not password:
-            return {"type":"register","ok":False,"error":"Thiếu username/password"}
+    # ---------- handlers ----------
+    def handle_register(self, sock, p):
+        u = (p.get("username") or "").strip()
+        pw = p.get("password") or ""
+        if not u or not pw:
+            return {"type": "register", "ok": False, "error": "Thiếu username/password"}
         with LOCK:
-            if username in self.users:
-                return {"type":"register","ok":False,"error":"Username đã tồn tại"}
+            if u in self.users:
+                return {"type": "register", "ok": False, "error": "Username đã tồn tại"}
             salt = os.urandom(8).hex()
-            pwd_hash = sha256(password + salt)
-            self.users[username] = {
+            self.users[u] = {
                 "salt": salt,
-                "pwd_hash": pwd_hash,
+                "pwd_hash": sha256(pw + salt),
                 "friends": set(),
                 "rooms": set(),
                 "incoming": set(),
@@ -173,329 +167,277 @@ class ChatServer:
                 "offline_queue": []
             }
             self.save_data()
-        return {"type":"register","ok":True,"message":"Đăng ký thành công"}
+        return {"type": "register", "ok": True, "message": "Đăng ký thành công"}
 
-    def handle_login(self, sock, payload):
-        username = payload.get("username","").strip()
-        password = payload.get("password","")
+    def handle_login(self, sock, p):
+        u = (p.get("username") or "").strip()
+        pw = p.get("password") or ""
         with LOCK:
-            info = self.users.get(username)
-            if not info:
-                return {"type":"login","ok":False,"error":"Sai username hoặc password"}
-            if sha256(password + info["salt"]) != info["pwd_hash"]:
-                return {"type":"login","ok":False,"error":"Sai username hoặc password"}
+            info = self.users.get(u)
+            if not info or sha256(pw + info["salt"]) != info["pwd_hash"]:
+                return {"type": "login", "ok": False, "error": "Sai username hoặc password"}
 
-            # terminate old session if any
-            old = self.online.get(username)
+            old = self.online.get(u)
             if old and old is not sock:
                 try:
-                    json_send(old, {"type":"system","message":"Tài khoản đăng nhập ở nơi khác, ngắt kết nối.","ts":now_iso()})
+                    json_send(old, {"type": "system", "message": "Tài khoản đăng nhập ở nơi khác, ngắt kết nối.", "ts": now_iso()})
                     old.close()
                 except Exception:
                     pass
 
-            self.online[username] = sock
-            self.sock2user[sock] = username
+            self.online[u] = sock
+            self.sock2user[sock] = u
 
-        # ack
-        resp = {"type":"login","ok":True,"username":username,"ts":now_iso()}
-        # send offline queue
+        # ACK nhanh
+        json_send(sock, {"type": "login", "ok": True, "username": u, "ts": now_iso()})
+
+        # Gửi offline queue
         with LOCK:
-            queue = info.get("offline_queue", [])
-            for item in queue:
+            q = info.get("offline_queue", [])
+            for item in q:
                 json_send(sock, item)
             info["offline_queue"] = []
             self.save_data()
 
-        self.emit_friend_list(username)
-        self.list_my_rooms(username)
-        self.presence_update(username, True)
-        return resp
+        # Gửi danh sách bạn + phòng + presence
+        self.emit_friend_list(u)
+        self.emit_room_list(u)
+        self.presence_update(u, True)
+        return None
 
     def handle_logout(self, sock):
         with LOCK:
-            username = self.sock2user.get(sock)
-            if username:
-                self.online.pop(username, None)
+            u = self.sock2user.get(sock)
+            if u:
+                self.online.pop(u, None)
                 self.sock2user.pop(sock, None)
-        if username:
-            self.presence_update(username, False)
+        if u:
+            self.presence_update(u, False)
 
-    def handle_search_users(self, sock, payload):
-        q = (payload.get("query","") or "").lower()
-        res = []
-        with LOCK:
-            for u in self.users.keys():
-                if q in u.lower():
-                    res.append(u)
-        return {"type":"search_users","ok":True,"results":sorted(res)[:50]}
+    # --- SEARCH USERS ---
+    def handle_search_users(self, sock, p):
+        q = (p.get("query") or "").lower()
+        if not q:
+            return {"type": "search_users", "ok": True, "results": sorted(self.users.keys())[:50]}
+        exact  = [u for u in self.users if u.lower() == q]
+        prefix = [u for u in self.users if u.lower().startswith(q) and u not in exact]
+        substr = [u for u in self.users if q in u.lower() and u not in exact and u not in prefix]
+        return {"type": "search_users", "ok": True, "results": (exact + prefix + substr)[:50]}
 
-    # ---- Friend management ----
-    def handle_friend_request(self, sock, payload):
+    # --- FRIEND REQUESTS (Realtime) ---
+    def handle_friend_request(self, sock, p):
         me = self.sock2user.get(sock)
-        to_user = payload.get("to")
+        to_user = (p.get("to") or "").strip()
         if not me or not to_user or me == to_user:
-            return {"type":"friend_request","ok":False,"error":"Yêu cầu không hợp lệ"}
+            return {"type": "friend_request", "ok": False, "error": "Yêu cầu không hợp lệ"}
         with LOCK:
             if to_user not in self.users:
-                return {"type":"friend_request","ok":False,"error":"Người dùng không tồn tại"}
+                return {"type": "friend_request", "ok": False, "error": "Người dùng không tồn tại"}
             info_me = self.users[me]
             info_to = self.users[to_user]
             if to_user in info_me["friends"]:
-                return {"type":"friend_request","ok":False,"error":"Đã là bạn"}
-            info_me["outgoing"].add(to_user)
-            info_to["incoming"].add(me)
-            self.save_data()
-        # notify
+                return {"type": "friend_request", "ok": False, "error": "Đã là bạn"}
+            if me not in info_to["incoming"]:
+                info_me["outgoing"].add(to_user)
+                info_to["incoming"].add(me)
+                self.save_data()
+
+        # phản hồi ngay cho người gửi
+        json_send(sock, {"type": "friend_request", "ok": True, "message": "Đã gửi lời mời", "ts": now_iso()})
         self.emit_friend_list(me)
+
+        # đẩy thông báo ngay cho người nhận + cập nhật danh sách
         s = self.online.get(to_user)
         if s:
-            json_send(s, {"type":"friend_request","from":me,"ts":now_iso()})
+            json_send(s, {"type": "friend_request", "from": me, "ts": now_iso()})
             self.emit_friend_list(to_user)
-        return {"type":"friend_request","ok":True,"message":"Đã gửi lời mời"}
+        return None
 
-    def handle_friend_accept(self, sock, payload):
+    def handle_friend_accept(self, sock, p):
         me = self.sock2user.get(sock)
-        from_user = payload.get("from")
+        from_user = (p.get("from") or "").strip()
         if not me or not from_user:
-            return {"type":"friend_accept","ok":False,"error":"Yêu cầu không hợp lệ"}
+            return {"type": "friend_accept", "ok": False, "error": "Yêu cầu không hợp lệ"}
         with LOCK:
             info_me = self.users.get(me)
-            info_from = self.users.get(from_user)
-            if not info_me or not info_from: 
-                return {"type":"friend_accept","ok":False,"error":"User không tồn tại"}
+            info_fr = self.users.get(from_user)
+            if not info_me or not info_fr:
+                return {"type": "friend_accept", "ok": False, "error": "User không tồn tại"}
             if from_user in info_me["incoming"]:
                 info_me["incoming"].discard(from_user)
-                info_from["outgoing"].discard(me)
+                info_fr["outgoing"].discard(me)
                 info_me["friends"].add(from_user)
-                info_from["friends"].add(me)
+                info_fr["friends"].add(me)
                 self.save_data()
             else:
-                return {"type":"friend_accept","ok":False,"error":"Không có lời mời"}
+                return {"type": "friend_accept", "ok": False, "error": "Không có lời mời"}
+
+        # cập nhật danh sách hai bên ngay
         self.emit_friend_list(me)
         self.emit_friend_list(from_user)
-        return {"type":"friend_accept","ok":True}
 
-    def handle_friend_decline(self, sock, payload):
+        # báo cho bên kia
+        s_from = self.online.get(from_user)
+        if s_from:
+            json_send(s_from, {"type": "friend_accept", "from": me, "ok": True, "ts": now_iso()})
+
+        return {"type": "friend_accept", "ok": True}
+
+    def handle_friend_decline(self, sock, p):
         me = self.sock2user.get(sock)
-        from_user = payload.get("from")
+        from_user = (p.get("from") or "").strip()
         with LOCK:
             info_me = self.users.get(me)
-            info_from = self.users.get(from_user)
-            if info_me and info_from and from_user in info_me["incoming"]:
+            info_fr = self.users.get(from_user)
+            if info_me and info_fr and from_user in info_me["incoming"]:
                 info_me["incoming"].discard(from_user)
-                info_from["outgoing"].discard(me)
+                info_fr["outgoing"].discard(me)
                 self.save_data()
         self.emit_friend_list(me)
         self.emit_friend_list(from_user)
-        return {"type":"friend_decline","ok":True}
+        s_from = self.online.get(from_user)
+        if s_from:
+            json_send(s_from, {"type": "friend_decline", "from": me, "ok": True, "ts": now_iso()})
+        return {"type": "friend_decline", "ok": True}
 
-    def handle_friend_remove(self, sock, payload):
+    # --- ROOMS / MESSAGES (cốt lõi để test) ---
+    def handle_create_room(self, sock, p):
         me = self.sock2user.get(sock)
-        who = payload.get("who")
-        with LOCK:
-            info_me = self.users.get(me)
-            info_w = self.users.get(who)
-            if info_me and info_w:
-                info_me["friends"].discard(who)
-                info_w["friends"].discard(me)
-                self.save_data()
-        self.emit_friend_list(me)
-        self.emit_friend_list(who)
-        return {"type":"friend_remove","ok":True}
-
-    # ---- Rooms ----
-    def handle_create_room(self, sock, payload):
-        me = self.sock2user.get(sock)
-        room = payload.get("room","").strip()
+        room = (p.get("room") or "").strip()
         if not room:
-            return {"type":"create_room","ok":False,"error":"Thiếu tên phòng"}
+            return {"type": "create_room", "ok": False, "error": "Thiếu tên phòng"}
         with LOCK:
             if room in self.rooms:
-                return {"type":"create_room","ok":False,"error":"Phòng đã tồn tại"}
-            self.rooms[room] = {"owner": me, "members": set([me]), "messages":[]}
+                return {"type": "create_room", "ok": False, "error": "Phòng đã tồn tại"}
+            self.rooms[room] = {"owner": me, "members": set([me]), "messages": []}
             self.users[me]["rooms"].add(room)
             self.save_data()
-        self.list_my_rooms(me)
-        return {"type":"create_room","ok":True,"room":room}
+        self.emit_room_list(me)
+        return {"type": "create_room", "ok": True, "room": room}
 
-    def handle_join_room(self, sock, payload):
+    def handle_join_room(self, sock, p):
         me = self.sock2user.get(sock)
-        room = payload.get("room","").strip()
+        room = (p.get("room") or "").strip()
         with LOCK:
             info = self.rooms.get(room)
             if not info:
-                return {"type":"join_room","ok":False,"error":"Phòng không tồn tại"}
+                return {"type": "join_room", "ok": False, "error": "Phòng không tồn tại"}
             info["members"].add(me)
             self.users[me]["rooms"].add(room)
             self.save_data()
-        self.list_my_rooms(me)
-        # notify members
-        self.broadcast_to(set(info["members"]), {"type":"room_update","room":room,"action":"join","user":me,"ts":now_iso()}, exclude=None)
-        return {"type":"join_room","ok":True,"room":room}
+        self.emit_room_list(me)
+        for u in list(info["members"]):
+            s = self.online.get(u)
+            if s:
+                json_send(s, {"type": "room_update", "room": room, "action": "join", "user": me, "ts": now_iso()})
+        return {"type": "join_room", "ok": True, "room": room}
 
-    def handle_leave_room(self, sock, payload):
+    def handle_send_message(self, sock, p):
         me = self.sock2user.get(sock)
-        room = payload.get("room","").strip()
-        with LOCK:
-            info = self.rooms.get(room)
-            if not info: 
-                return {"type":"leave_room","ok":False,"error":"Phòng không tồn tại"}
-            info["members"].discard(me)
-            self.users[me]["rooms"].discard(room)
-            self.save_data()
-        self.list_my_rooms(me)
-        self.broadcast_to(set(info["members"]), {"type":"room_update","room":room,"action":"leave","user":me,"ts":now_iso()}, exclude=None)
-        return {"type":"leave_room","ok":True}
-
-    # ---- Messaging & typing ----
-    def handle_send_message(self, sock, payload):
-        me = self.sock2user.get(sock)
-        target_type = payload.get("target_type")  # 'dm' or 'room'
-        to = payload.get("to")
-        msgtype = payload.get("msgtype","text")
-        content = payload.get("content","")
-        filename = payload.get("filename")
-        data_b64 = payload.get("data_base64")
+        target_type = p.get("target_type")
+        to = p.get("to")
+        msgtype = p.get("msgtype", "text")
+        content = p.get("content", "")
+        filename = p.get("filename")
+        data_b64 = p.get("data_base64")
         ts = now_iso()
 
-        msg = {
-            "from": me, "to": to, "target_type": target_type,
-            "msgtype": msgtype, "content": content, "filename": filename,
-            "data_base64": data_b64, "ts": ts
-        }
+        msg = {"from": me, "to": to, "target_type": target_type, "msgtype": msgtype,
+               "content": content, "filename": filename, "data_base64": data_b64, "ts": ts}
 
         with LOCK:
             if target_type == "dm":
                 if to not in self.users:
-                    return {"type":"send_message","ok":False,"error":"Người nhận không tồn tại"}
+                    return {"type": "send_message", "ok": False, "error": "Người nhận không tồn tại"}
                 key = self.dm_key(me, to)
                 self.dm_messages.setdefault(key, []).append(msg)
-                # deliver
-                self.deliver_or_queue(to, msg)
+                self.deliver_or_queue(to, {"type": "new_message", "message": msg, "ts": ts})
             elif target_type == "room":
                 info = self.rooms.get(to)
                 if not info or me not in info["members"]:
-                    return {"type":"send_message","ok":False,"error":"Không có quyền gửi vào phòng"}
+                    return {"type": "send_message", "ok": False, "error": "Không có quyền gửi vào phòng"}
                 info["messages"].append(msg)
-                members = set(info["members"])
-                self.broadcast_to(members, {"type":"new_message","message":msg,"ts":ts}, exclude=None)
+                for u in list(info["members"]):
+                    s = self.online.get(u)
+                    if s:
+                        json_send(s, {"type": "new_message", "message": msg, "ts": ts})
             else:
-                return {"type":"send_message","ok":False,"error":"target_type không hợp lệ"}
+                return {"type": "send_message", "ok": False, "error": "target_type không hợp lệ"}
 
             self.save_data()
-        return {"type":"send_message","ok":True,"ts":ts}
+        return {"type": "send_message", "ok": True, "ts": ts}
 
-    def handle_fetch_history(self, sock, payload):
+    def handle_fetch_history(self, sock, p):
         me = self.sock2user.get(sock)
-        target_type = payload.get("target_type")
-        to = payload.get("to")
-        limit = int(payload.get("limit", 200))
+        t = p.get("target_type"); to = p.get("to"); limit = int(p.get("limit", 200))
         with LOCK:
-            if target_type == "dm":
+            if t == "dm":
                 key = self.dm_key(me, to)
                 msgs = self.dm_messages.get(key, [])[-limit:]
             else:
                 info = self.rooms.get(to)
                 if not info:
-                    return {"type":"fetch_history","ok":False,"error":"Phòng không tồn tại"}
+                    return {"type": "fetch_history", "ok": False, "error": "Phòng không tồn tại"}
                 msgs = info.get("messages", [])[-limit:]
-        return {"type":"fetch_history","ok":True,"messages":msgs}
+        return {"type": "fetch_history", "ok": True, "messages": msgs}
 
-    def handle_search_history(self, sock, payload):
+    def handle_typing(self, sock, p):
         me = self.sock2user.get(sock)
-        target_type = payload.get("target_type")
-        to = payload.get("to")
-        keyword = (payload.get("keyword","") or "").lower()
-        date_from = payload.get("date_from")  # 'YYYY-MM-DD'
-        date_to = payload.get("date_to")
-        def in_range(ts):
-            try:
-                d = datetime.datetime.strptime(ts[:10], "%Y-%m-%d").date()
-            except Exception:
-                return True
-            ok = True
-            if date_from:
-                ok &= d >= datetime.datetime.strptime(date_from,"%Y-%m-%d").date()
-            if date_to:
-                ok &= d <= datetime.datetime.strptime(date_to,"%Y-%m-%d").date()
-            return ok
-
-        with LOCK:
-            if target_type == "dm":
-                key = self.dm_key(me, to)
-                msgs = self.dm_messages.get(key, [])
-            else:
-                info = self.rooms.get(to)
-                if not info:
-                    return {"type":"search_history","ok":False,"error":"Phòng không tồn tại"}
-                msgs = info.get("messages", [])
-            results = []
-            for m in msgs:
-                text = (m.get("content") or "").lower()
-                if (not keyword or keyword in text) and in_range(m.get("ts","")):
-                    results.append(m)
-        return {"type":"search_history","ok":True,"messages":results[-500:]}
-
-    def handle_typing(self, sock, payload):
-        me = self.sock2user.get(sock)
-        target_type = payload.get("target_type")
-        to = payload.get("to")
-        is_typing = bool(payload.get("is_typing"))
-        if target_type == "dm":
-            self.deliver_or_queue(to, {"from":me,"to":to,"target_type":"dm","msgtype":"typing","content":"","filename":None,"data_base64":None,"ts":now_iso(),"is_typing":is_typing})
-        elif target_type == "room":
+        t = p.get("target_type"); to = p.get("to"); is_typing = bool(p.get("is_typing"))
+        if t == "dm":
+            self.deliver_or_queue(to, {"type": "new_message", "message": {"from": me, "to": to, "target_type": "dm",
+                                                                          "msgtype": "typing", "content": "", "filename": None,
+                                                                          "data_base64": None, "ts": now_iso(),
+                                                                          "is_typing": is_typing}, "ts": now_iso()})
+        elif t == "room":
             with LOCK:
                 info = self.rooms.get(to)
-                if not info: return {"type":"typing","ok":False}
-                self.broadcast_to(set(info["members"]), {"type":"typing","from":me,"room":to,"is_typing":is_typing,"ts":now_iso()}, exclude=None)
-        return {"type":"typing","ok":True}
+                if not info:
+                    return {"type": "typing", "ok": False}
+                for u in list(info["members"]):
+                    s = self.online.get(u)
+                    if s:
+                        json_send(s, {"type": "typing", "from": me, "room": to, "is_typing": is_typing, "ts": now_iso()})
+        return {"type": "typing", "ok": True}
 
-    # ---------- Client thread ----------
+    # ---------- client thread ----------
     def client_thread(self, sock: socket.socket, addr):
         fp = sock.makefile("r", encoding="utf-8", newline="\n")
-        self.send_system(sock, "Kết nối server OK.")
+        json_send(sock, {"type": "system", "ok": True, "message": "Kết nối server OK.", "ts": now_iso()})
         try:
             for obj in json_lines(fp):
-                t = obj.get("type")
-                payload = obj.get("payload", {})
-                if t == "register":
-                    json_send(sock, self.handle_register(sock, payload))
-                elif t == "login":
-                    json_send(sock, self.handle_login(sock, payload))
-                elif t == "logout":
-                    self.handle_logout(sock)
-                    json_send(sock, {"type":"logout","ok":True})
-                elif t == "search_users":
-                    json_send(sock, self.handle_search_users(sock, payload))
-                elif t == "friend_request":
-                    json_send(sock, self.handle_friend_request(sock, payload))
-                elif t == "friend_accept":
-                    json_send(sock, self.handle_friend_accept(sock, payload))
-                elif t == "friend_decline":
-                    json_send(sock, self.handle_friend_decline(sock, payload))
-                elif t == "friend_remove":
-                    json_send(sock, self.handle_friend_remove(sock, payload))
-                elif t == "create_room":
-                    json_send(sock, self.handle_create_room(sock, payload))
-                elif t == "join_room":
-                    json_send(sock, self.handle_join_room(sock, payload))
-                elif t == "leave_room":
-                    json_send(sock, self.handle_leave_room(sock, payload))
-                elif t == "send_message":
-                    json_send(sock, self.handle_send_message(sock, payload))
-                elif t == "fetch_history":
-                    json_send(sock, self.handle_fetch_history(sock, payload))
-                elif t == "search_history":
-                    json_send(sock, self.handle_search_history(sock, payload))
-                elif t == "typing":
-                    json_send(sock, self.handle_typing(sock, payload))
-                elif t == "list_friends":
-                    self.emit_friend_list(self.sock2user.get(sock,""))
-                elif t == "list_rooms":
-                    self.list_my_rooms(self.sock2user.get(sock,""))
+                typ = obj.get("type"); p = obj.get("payload", {})
+                # realtime ưu tiên
+                if typ == "login":
+                    self.handle_login(sock, p)
+                elif typ == "logout":
+                    self.handle_logout(sock); json_send(sock, {"type": "logout", "ok": True})
+                elif typ == "friend_request":
+                    self.handle_friend_request(sock, p)
+                elif typ == "friend_accept":
+                    json_send(sock, self.handle_friend_accept(sock, p))
+                elif typ == "friend_decline":
+                    json_send(sock, self.handle_friend_decline(sock, p))
+                elif typ == "register":
+                    json_send(sock, self.handle_register(sock, p))
+                elif typ == "search_users":
+                    json_send(sock, self.handle_search_users(sock, p))
+                elif typ == "create_room":
+                    json_send(sock, self.handle_create_room(sock, p))
+                elif typ == "join_room":
+                    json_send(sock, self.handle_join_room(sock, p))
+                elif typ == "send_message":
+                    json_send(sock, self.handle_send_message(sock, p))
+                elif typ == "fetch_history":
+                    json_send(sock, self.handle_fetch_history(sock, p))
+                elif typ == "typing":
+                    json_send(sock, self.handle_typing(sock, p))
+                elif typ == "list_friends":
+                    self.emit_friend_list(self.sock2user.get(sock, ""))
+                elif typ == "list_rooms":
+                    self.emit_room_list(self.sock2user.get(sock, ""))
                 else:
-                    self.send_system(sock, "Loại thông điệp không hỗ trợ.")
+                    json_send(sock, {"type": "system", "message": "Loại thông điệp không hỗ trợ.", "ts": now_iso()})
         except Exception:
             pass
         finally:
@@ -505,7 +447,6 @@ class ChatServer:
                 pass
             self.handle_logout(sock)
 
-    # ---------- Run ----------
     def run(self):
         print(f"Server listening on {self.host}:{self.port}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -513,9 +454,8 @@ class ChatServer:
             s.bind((self.host, self.port))
             s.listen()
             while True:
-                client, addr = s.accept()
-                t = threading.Thread(target=self.client_thread, args=(client, addr), daemon=True)
-                t.start()
+                c, addr = s.accept()
+                threading.Thread(target=self.client_thread, args=(c, addr), daemon=True).start()
 
 if __name__ == "__main__":
     ChatServer(HOST, PORT).run()
