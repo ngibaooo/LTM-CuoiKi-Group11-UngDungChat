@@ -91,6 +91,7 @@ class ChatApp(tk.Tk):
         self.history = {}         # chat_id -> list of messages
         self.images_cache = []    # keep references to PhotoImage
         self.typing_labels = {}   # chat_id -> label text (who typing)
+        self.main_ui_built = False
 
         # UI
         self.build_login_ui()
@@ -134,10 +135,17 @@ class ChatApp(tk.Tk):
         self.l_user = tk.StringVar()
         self.l_pass = tk.StringVar()
         ttk.Label(self.tab_login, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_login, textvariable=self.l_user, width=30).grid(row=0, column=1, padx=6, pady=6)
+        ent_user = ttk.Entry(self.tab_login, textvariable=self.l_user, width=30)
+        ent_user.grid(row=0, column=1, padx=6, pady=6)
         ttk.Label(self.tab_login, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_login, textvariable=self.l_pass, show="•", width=30).grid(row=1, column=1, padx=6, pady=6)
-        ttk.Button(self.tab_login, text="Đăng nhập", command=self.do_login).grid(row=2, column=0, columnspan=2, pady=10)
+        ent_pass = ttk.Entry(self.tab_login, textvariable=self.l_pass, show="•", width=30)
+        ent_pass.grid(row=1, column=1, padx=6, pady=6)
+        btn_login = ttk.Button(self.tab_login, text="Đăng nhập", command=self.do_login)
+        btn_login.grid(row=2, column=0, columnspan=2, pady=10)
+
+        # Enter to login
+        ent_user.bind("<Return>", lambda e: self.do_login())
+        ent_pass.bind("<Return>", lambda e: self.do_login())
 
         # Register
         self.r_user = tk.StringVar()
@@ -176,11 +184,17 @@ class ChatApp(tk.Tk):
             messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
 
     def set_status(self, text):
-        self.status_lbl.configure(text=text)
+        if hasattr(self, "status_lbl"):
+            self.status_lbl.configure(text=text)
 
     # ---------- Main UI after login ----------
     def build_main_ui(self):
-        self.login_frame.destroy()
+        if self.main_ui_built:
+            return
+        self.main_ui_built = True
+
+        if hasattr(self, "login_frame") and self.login_frame.winfo_exists():
+            self.login_frame.destroy()
 
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
@@ -279,7 +293,7 @@ class ChatApp(tk.Tk):
         ttk.Entry(sr, textvariable=self.search_to, width=12).pack(side="left", padx=2)
         ttk.Button(sr, text="Tìm", command=self.ui_search_history).pack(side="left", padx=6)
 
-        # Ask server initial lists
+        # Hỏi server danh sách ban đầu
         self.net.send("list_friends", {})
         self.net.send("list_rooms", {})
 
@@ -413,7 +427,6 @@ class ChatApp(tk.Tk):
     # typing indicator
     def on_typing_keypress(self, _evt):
         if not self.current_chat: return
-        # Send lightweight typing event
         kind, name = self.current_chat
         self.net.send("typing", {"target_type": kind, "to": name, "is_typing": True})
 
@@ -434,7 +447,6 @@ class ChatApp(tk.Tk):
             bubble.pack(anchor="w" if left else "e", fill="x", pady=2, padx=8)
             head = ttk.Label(bubble, text=f"{who} • {ts}", foreground="#555")
             head.pack(anchor="w" if left else "e")
-            # content
             if m.get("msgtype") == "text":
                 body = tk.Text(bubble, height=2, wrap="word", relief="flat", bg="#f6f6f6")
                 body.insert("1.0", m.get("content",""))
@@ -445,13 +457,11 @@ class ChatApp(tk.Tk):
                 data = m.get("data_base64")
                 lbl = ttk.Label(bubble, text=f"[Ảnh] {fname}")
                 lbl.pack(anchor="w")
-                # show PNG/GIF inline if possible
                 ext = os.path.splitext(fname.lower())[1]
                 if ext in [".png", ".gif"]:
                     try:
                         img = tk.PhotoImage(data=base64.b64decode(data))
                     except Exception:
-                        # Some Tk versions require file=, fallback to temp
                         tmp = os.path.join(os.getcwd(), f"tmp_{fname}")
                         with open(tmp, "wb") as f:
                             f.write(base64.b64decode(data))
@@ -466,7 +476,6 @@ class ChatApp(tk.Tk):
                 ttk.Label(bubble, text=f"[File] {fname}").pack(anchor="w")
                 ttk.Button(bubble, text="Lưu file", command=lambda d=m.get("data_base64"), fn=fname: self.save_bytes(d, fn)).pack(anchor="w")
             elif m.get("msgtype") == "typing":
-                # ignored in history rendering
                 pass
 
         self.msg_canvas.update_idletasks()
@@ -482,22 +491,29 @@ class ChatApp(tk.Tk):
 
     def refresh_lists(self):
         # friends
-        self.friends_list.delete(0, "end")
-        for u in sorted(self.friends.keys()):
-            status = "🟢" if self.friends[u] else "⚫"
-            cid = self.chat_id("dm", u)
-            unread = self.unread.get(cid, 0)
-            dot = f"  ({unread})" if unread else ""
-            self.friends_list.insert("end", f"{u} {status}{dot}")
+        if hasattr(self, "friends_list"):
+            self.friends_list.delete(0, "end")
+            for u in sorted(self.friends.keys()):
+                status = "🟢" if self.friends[u] else "⚫"
+                cid = self.chat_id("dm", u)
+                unread = self.unread.get(cid, 0)
+                dot = f"  ({unread})" if unread else ""
+                self.friends_list.insert("end", f"{u} {status}{dot}")
         # rooms
-        self.rooms_list.delete(0, "end")
-        for r in sorted(self.rooms):
-            cid = self.chat_id("room", r)
-            unread = self.unread.get(cid, 0)
-            dot = f"  ({unread})" if unread else ""
-            self.rooms_list.insert("end", f"{r}{dot}")
+        if hasattr(self, "rooms_list"):
+            self.rooms_list.delete(0, "end")
+            for r in sorted(self.rooms):
+                cid = self.chat_id("room", r)
+                unread = self.unread.get(cid, 0)
+                dot = f"  ({unread})" if unread else ""
+                self.rooms_list.insert("end", f"{r}{dot}")
 
     # ---------- Event handler from server ----------
+    def ensure_main_ui(self):
+        """Gọi an toàn để chắc chắn UI chính được dựng sau đăng nhập."""
+        if not self.main_ui_built and self.username:
+            self.build_main_ui()
+
     def handle_event(self, obj):
         t = obj.get("type")
         if t == "system":
@@ -505,7 +521,9 @@ class ChatApp(tk.Tk):
             if not self.username:
                 self.set_status(msg)
             else:
-                messagebox.showinfo("Hệ thống", msg)
+                # Chỉ thông báo nhẹ để tránh che UI khi spam
+                if msg:
+                    print("[SYSTEM]", msg)
         elif t == "register":
             if obj.get("ok"):
                 self.set_status("Đăng ký thành công. Vui lòng đăng nhập.")
@@ -514,40 +532,51 @@ class ChatApp(tk.Tk):
         elif t == "login":
             if obj.get("ok"):
                 self.username = obj.get("username")
-                self.build_main_ui()
+                self.ensure_main_ui()
+                # Sau khi dựng UI, yêu cầu danh sách
+                self.net.send("list_friends", {})
+                self.net.send("list_rooms", {})
                 self.set_status("")
             else:
                 self.set_status(f"Đăng nhập thất bại: {obj.get('error')}")
         elif t == "friend_list":
+            # Nếu vì lý do nào đó friend_list đến trước login(ok) ➜ vẫn dựng UI
+            self.ensure_main_ui()
             self.friends = {f["username"]: bool(f["online"]) for f in obj.get("friends", [])}
             self.incoming = obj.get("incoming", [])
             self.outgoing = obj.get("outgoing", [])
             self.refresh_lists()
         elif t == "friend_request":
+            self.ensure_main_ui()
             who = obj.get("from")
-            self.incoming.append(who)
+            if who and who not in self.incoming:
+                self.incoming.append(who)
             self.safe_bell()
             messagebox.showinfo("Yêu cầu kết bạn", f"{who} muốn kết bạn.")
             self.net.send("list_friends", {})
         elif t in ("friend_accept","friend_decline","friend_remove"):
+            self.ensure_main_ui()
             self.net.send("list_friends", {})
         elif t == "room_list":
+            self.ensure_main_ui()
             self.rooms = obj.get("rooms", [])
             self.refresh_lists()
         elif t == "room_update":
+            self.ensure_main_ui()
             self.net.send("list_rooms", {})
         elif t == "presence":
+            self.ensure_main_ui()
             u = obj.get("user")
             on = bool(obj.get("online"))
             if u in self.friends:
                 self.friends[u] = on
                 self.refresh_lists()
         elif t == "new_message":
+            self.ensure_main_ui()
             m = obj.get("message", {})
             kind = m.get("target_type")
             to = m.get("to")
             sender = m.get("from")
-            # Determine chat target where the msg belongs
             if kind == "dm":
                 chat_partner = sender if sender != self.username else to
                 cid = self.chat_id("dm", chat_partner)
@@ -555,20 +584,16 @@ class ChatApp(tk.Tk):
                 cid = self.chat_id("room", to)
 
             lst = self.history.setdefault(cid, [])
-            # typing events are not stored in history
             if m.get("msgtype") != "typing":
                 lst.append(m)
 
-            # Update typing indicator
             if m.get("msgtype") == "typing":
-                if self.current_chat and self.chat_id(*self.current_chat) in (cid,):
+                if self.current_chat and self.chat_id(*self.current_chat) == cid:
                     who = m.get("from")
                     self.typing_lbl.configure(text=f"{who} đang nhập...")
-                    # clear after 1.2s
                     self.after(1200, lambda: self.typing_lbl.configure(text=""))
                 return
 
-            # Unread count if not active
             if not self.current_chat or self.chat_id(*self.current_chat) != cid:
                 self.unread[cid] = self.unread.get(cid, 0) + 1
                 self.refresh_lists()
@@ -576,14 +601,13 @@ class ChatApp(tk.Tk):
             else:
                 self.render_messages(cid)
         elif t == "fetch_history":
-            if obj.get("ok"):
-                # determine cid from messages list by first item or fallback to current
-                msgs = obj.get("messages", [])
-                if self.current_chat:
-                    cid = self.chat_id(*self.current_chat)
-                    self.history[cid] = msgs
-                    self.render_messages(cid)
+            self.ensure_main_ui()
+            if obj.get("ok") and self.current_chat:
+                cid = self.chat_id(*self.current_chat)
+                self.history[cid] = obj.get("messages", [])
+                self.render_messages(cid)
         elif t == "search_users":
+            self.ensure_main_ui()
             res = obj.get("results", [])
             top = tk.Toplevel(self); top.title("Kết quả tìm kiếm người dùng")
             lb = tk.Listbox(top, width=30, height=12); lb.pack(padx=8, pady=8)
@@ -592,13 +616,13 @@ class ChatApp(tk.Tk):
                     lb.insert("end", u)
             ttk.Button(top, text="Kết bạn", command=lambda: self._req_from_list(lb, top)).pack(pady=6)
         elif t == "search_history":
+            self.ensure_main_ui()
             if not self.current_chat: return
             cid = self.chat_id(*self.current_chat)
             msgs = obj.get("messages", [])
             self.history[cid] = msgs
             self.render_messages(cid)
         else:
-            # ignore unknown
             pass
 
     def _req_from_list(self, lb, top):
