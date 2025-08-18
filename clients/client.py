@@ -1,1079 +1,614 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Client 1-file cho Ứng dụng Chat Socket (Python + Tkinter GUI)
------------------------------------------------------------------
-Tính năng triển khai (phía CLIENT):
-- Đăng ký / Đăng nhập (qua socket TCP gửi JSON)
-- Danh sách bạn bè (online/offline), tìm kiếm user, gửi/nhận lời mời kết bạn, chấp nhận/từ chối, xóa bạn
-- Chat 1-1 và Chat nhóm (phòng): tạo phòng, mời bạn, tham gia, rời phòng
-- Gửi/nhận tin nhắn dạng text + ảnh (base64). Hỗ trợ gửi file đính kèm dạng nhị phân (base64) ở mức cơ bản
-- Thông báo (Notification) khi có tin nhắn mới ở tab nền (nháy dấu * và chuông của Tkinter)
-- Trạng thái người dùng: online/offline, hiển thị trong Friend List
-- Typing indicator (đang gõ) ở mỗi khung chat
-- Tìm kiếm nội dung trong lịch sử chat theo từ khóa (cục bộ phía client)
-
-LƯU Ý/ GIẢ ĐỊNH GIAO THỨC (CẦN SERVER PHÙ HỢP):
-- Kết nối TCP tới server (host, port). Dữ liệu là các dòng JSON, mỗi thông điệp 1 dòng (\n-terminated)
-- Mọi gói tin đều có khóa "type": "request" hoặc "event" hoặc "response"
-- Gửi lên: {
-    "type": "request",
-    "req_id": int,         # client cấp số tăng dần
-    "action": str,         # ví dụ: login, register, send_message, ...
-    ... dữ liệu khác ...
-  }
-- Phản hồi: {
-    "type": "response",
-    "req_id": int,         # khớp với req_id
-    "action": str,
-    "ok": bool,
-    "message": str,        # mô tả
-    "data": {...}          # dữ liệu (nếu có)
-  }
-- Sự kiện đẩy từ server (không gắn req_id): {
-    "type": "event",
-    "event": str,          # ví dụ: message, presence_update, friend_request, room_update, ...
-    "data": {...}
-  }
-- Một số action dự kiến phía client (server cần hỗ trợ tương ứng):
-  register, login, get_friend_list, search_users, send_friend_request,
-  respond_friend_request, remove_friend,
-  create_room, join_room, leave_room, invite_to_room,
-  send_message, typing
-- Gói tin message (event)
-  {
-    "type": "event",
-    "event": "message",
-    "data": {
-        "from": str,
-        "to_type": "user"|"room",
-        "to": str,                   # username hoặc room_id
-        "msg_type": "text"|"image"|"file",
-        "content": str,              # text hoặc base64
-        "filename": str|None,        # nếu file/image
-        "timestamp": int             # epoch seconds
-    }
-  }
-
-CÀI ĐẶT PHỤ THUỘC:
-- Python 3.8+
-- Pillow (để hiển thị ảnh):
-    pip install pillow
-
-CHẠY:
-    python client_app.py
-
-Tác giả: GPT (kỹ sư lập trình mạng theo yêu cầu)
-"""
-
-import base64
-import io
-import json
-import os
-import queue
 import socket
-import sys
 import threading
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+import json
+import queue
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import base64
+import os
+import datetime
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, messagebox, filedialog
-    from tkinter.scrolledtext import ScrolledText
-except Exception as e:
-    print("Lỗi import Tkinter:", e)
-    sys.exit(1)
+HOST = "127.0.0.1"
+PORT = 5555
 
-# Pillow để hiển thị ảnh
-try:
-    from PIL import Image, ImageTk
-    PIL_AVAILABLE = True
-except Exception:
-    PIL_AVAILABLE = False
-
-# ============================ Tiện ích ============================
-
-def now_ts() -> int:
-    return int(time.time())
-
-
-def fmt_time(ts: Optional[int] = None) -> str:
-    if ts is None:
-        ts = now_ts()
-    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
-
-
-# ============================ Lớp mạng: ChatClient ============================
-
-class ChatClient:
-    """Quản lý kết nối TCP tới server, gửi/nhận JSON theo dòng."""
-    def __init__(self, on_event: Callable[[Dict[str, Any]], None]):
+# ------------- Networking layer -------------
+class NetClient:
+    def __init__(self, host, port, on_event):
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.fp = None
+        self.rx_thread = None
         self.on_event = on_event
-        self.sock: Optional[socket.socket] = None
-        self.reader_th: Optional[threading.Thread] = None
-        self.writer_th: Optional[threading.Thread] = None
-        self.send_q: "queue.Queue[str]" = queue.Queue()
-        self.alive = threading.Event()
-        self.alive.clear()
-        self.req_id = 1
-        self.lock = threading.Lock()
-        self.buffer = b""
+        self.lock = threading.RLock()
+        self.connected = False
 
-    def connect(self, host: str, port: int, timeout: float = 5.0) -> None:
-        if self.sock:
-            self.close()
+    def connect(self):
+        if self.connected:
+            return
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(timeout)
-        self.sock.connect((host, port))
-        self.sock.settimeout(None)
-        self.alive.set()
-        self.reader_th = threading.Thread(target=self._reader_loop, daemon=True)
-        self.writer_th = threading.Thread(target=self._writer_loop, daemon=True)
-        self.reader_th.start()
-        self.writer_th.start()
+        self.sock.connect((self.host, self.port))
+        self.fp = self.sock.makefile("r", encoding="utf-8", newline="\n")
+        self.connected = True
+        self.rx_thread = threading.Thread(target=self.rx_loop, daemon=True)
+        self.rx_thread.start()
 
     def close(self):
-        self.alive.clear()
         try:
-            if self.sock:
-                try:
-                    self.sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                self.sock.close()
+            with self.lock:
+                if self.sock:
+                    self.sock.close()
         except Exception:
             pass
-        self.sock = None
+        self.connected = False
 
-    def next_req_id(self) -> int:
+    def send(self, typ, payload):
+        if not self.connected:
+            self.connect()
+        obj = {"type": typ, "payload": payload}
+        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
         with self.lock:
-            rid = self.req_id
-            self.req_id += 1
-        return rid
+            self.sock.sendall(data)
 
-    def send_json(self, obj: Dict[str, Any]):
+    def rx_loop(self):
         try:
-            data = (json.dumps(obj, ensure_ascii=False) + "\n").encode('utf-8')
-            self.send_q.put(data.decode('utf-8'))
-        except Exception as e:
-            print("send_json error:", e)
-
-    def _writer_loop(self):
-        try:
-            while self.alive.is_set() and self.sock:
-                try:
-                    line = self.send_q.get(timeout=0.2)
-                except queue.Empty:
+            for line in self.fp:
+                line = line.strip()
+                if not line: 
                     continue
-                if not self.sock:
-                    break
                 try:
-                    self.sock.sendall(line.encode('utf-8'))
-                except Exception as e:
-                    print("Send error:", e)
-                    break
+                    obj = json.loads(line)
+                    self.on_event(obj)
+                except Exception:
+                    continue
+        except Exception:
+            pass
         finally:
-            self.alive.clear()
+            self.connected = False
+            self.on_event({"type":"system","message":"Mất kết nối server."})
 
-    def _reader_loop(self):
-        buf = b""
-        try:
-            while self.alive.is_set() and self.sock:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line.decode('utf-8'))
-                        # Đẩy sang GUI thread qua callback
-                        self.on_event(obj)
-                    except Exception as e:
-                        print("JSON parse error:", e, "line:", line[:200])
-        except Exception as e:
-            print("Reader loop error:", e)
-        finally:
-            self.alive.clear()
-            # Thông báo ngắt kết nối
-            try:
-                self.on_event({"type": "event", "event": "disconnected", "data": {}})
-            except Exception:
-                pass
-
-
-# ============================ Mô hình dữ liệu đơn giản ============================
-
-@dataclass
-class ChatMessage:
-    sender: str
-    to_type: str  # 'user' or 'room'
-    to_id: str
-    msg_type: str  # 'text' | 'image' | 'file'
-    content: str
-    filename: Optional[str] = None
-    timestamp: int = field(default_factory=now_ts)
-
-
-# ============================ GUI: Ứng dụng ============================
-
-class ChatGUI:
+# ------------- GUI & App state -------------
+class ChatApp(tk.Tk):
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Chat Socket Client")
-        self.root.geometry("1200x750")
-
-        # Hàng đợi nhận sự kiện từ mạng (đảm bảo thread-safe)
-        self.ev_q: "queue.Queue[dict]" = queue.Queue()
-
-        # Client mạng
-        self.client = ChatClient(on_event=self._on_net_event)
-
-        # Trạng thái người dùng đang đăng nhập
-        self.me: Optional[str] = None
-        self.token: Optional[str] = None  # nếu server trả về token
-
-        # Bộ nhớ danh sách bạn và phòng
-        self.friends: Dict[str, Dict[str, Any]] = {}  # username -> {online: bool}
-        self.rooms: Dict[str, Dict[str, Any]] = {}    # room_id -> {name: str}
-        self.friend_requests_inbox: List[str] = []    # danh sách user gửi lời mời đến mình
-
-        # Bộ nhớ tin nhắn cục bộ: key = (to_type, to_id), value = List[ChatMessage]
-        self.history: Dict[tuple, List[ChatMessage]] = {}
-
-        # Map chat tab theo key
-        self.chat_tabs: Dict[tuple, 'ChatTab'] = {}
-
-        # Xây Login UI trước
-        self._build_login_ui()
-
-        # Poll hàng đợi sự kiện mạng mỗi 100ms
-        self.root.after(100, self._process_events)
-
-    # -------------------- Networking event entry (from network thread) --------------------
-    def _on_net_event(self, obj: Dict[str, Any]):
-        # Đưa vào hàng đợi để xử lý trên GUI thread
-        self.ev_q.put(obj)
-
-    def _process_events(self):
-        try:
-            while True:
-                obj = self.ev_q.get_nowait()
-                self._handle_event_on_gui(obj)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._process_events)
-
-    # -------------------- Build Login UI --------------------
-    def _build_login_ui(self):
-        self.login_frame = ttk.Frame(self.root, padding=20)
-        self.login_frame.pack(fill=tk.BOTH, expand=True)
-
-        title = ttk.Label(self.login_frame, text="Đăng nhập / Đăng ký", font=("Segoe UI", 18, "bold"))
-        title.pack(pady=(0, 15))
-
-        grid = ttk.Frame(self.login_frame)
-        grid.pack()
-
-        ttk.Label(grid, text="Server Host:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
-        self.var_host = tk.StringVar(value="127.0.0.1")
-        ttk.Entry(grid, textvariable=self.var_host, width=24).grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(grid, text="Server Port:").grid(row=0, column=2, sticky=tk.W, padx=5, pady=5)
-        self.var_port = tk.StringVar(value="9009")
-        ttk.Entry(grid, textvariable=self.var_port, width=10).grid(row=0, column=3, padx=5, pady=5)
-
-        ttk.Label(grid, text="Username:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
-        self.var_user = tk.StringVar()
-        ttk.Entry(grid, textvariable=self.var_user, width=24).grid(row=1, column=1, padx=5, pady=5)
-
-        ttk.Label(grid, text="Password:").grid(row=1, column=2, sticky=tk.W, padx=5, pady=5)
-        self.var_pass = tk.StringVar()
-        ttk.Entry(grid, textvariable=self.var_pass, show="*", width=24).grid(row=1, column=3, padx=5, pady=5)
-
-        btns = ttk.Frame(self.login_frame)
-        btns.pack(pady=10)
-        ttk.Button(btns, text="Kết nối", command=self._connect).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btns, text="Đăng nhập", command=self._login).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btns, text="Đăng ký", command=self._register).pack(side=tk.LEFT, padx=8)
-
-        self.login_status = ttk.Label(self.login_frame, text="Chưa kết nối")
-        self.login_status.pack(pady=5)
-
-    def _connect(self):
-        host = self.var_host.get().strip()
-        try:
-            port = int(self.var_port.get().strip())
-        except ValueError:
-            messagebox.showerror("Lỗi", "Port không hợp lệ")
-            return
-        try:
-            self.client.connect(host, port)
-            self.login_status.config(text=f"Đã kết nối tới {host}:{port}")
-        except Exception as e:
-            messagebox.showerror("Kết nối thất bại", str(e))
-
-    def _register(self):
-        if not self.client.sock:
-            self._connect()
-            if not self.client.sock:
-                return
-        username = self.var_user.get().strip()
-        password = self.var_pass.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Thiếu thông tin", "Nhập username và password")
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "register",
-            "username": username,
-            "password": password,
-        })
-        self.login_status.config(text="Đang đăng ký...")
-
-    def _login(self):
-        if not self.client.sock:
-            self._connect()
-            if not self.client.sock:
-                return
-        username = self.var_user.get().strip()
-        password = self.var_pass.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Thiếu thông tin", "Nhập username và password")
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "login",
-            "username": username,
-            "password": password,
-        })
-        self.login_status.config(text="Đang đăng nhập...")
-
-    # -------------------- Build Main UI sau khi đăng nhập --------------------
-    def _build_main_ui(self):
-        self.login_frame.destroy()
-        self.root.title(f"Chat Client - {self.me}")
-
-        self.topbar = ttk.Frame(self.root)
-        self.topbar.pack(fill=tk.X)
-        ttk.Label(self.topbar, text=f"Xin chào, {self.me}", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT, padx=8, pady=6)
-        self.btn_disconnect = ttk.Button(self.topbar, text="Ngắt kết nối", command=self._disconnect)
-        self.btn_disconnect.pack(side=tk.RIGHT, padx=8)
-
-        # Khung chính chia 2 cột
-        self.main = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        self.main.pack(fill=tk.BOTH, expand=True)
-
-        # Cột trái: Danh bạ, lời mời, phòng
-        self.left = ttk.Frame(self.main, padding=6)
-        self.main.add(self.left, weight=1)
-
-        # Cột phải: Tabs chat
-        self.right = ttk.Frame(self.main, padding=6)
-        self.main.add(self.right, weight=4)
-
-        # ---- Friends section ----
-        lab1 = ttk.Label(self.left, text="Danh bạ bạn bè", font=("Segoe UI", 11, "bold"))
-        lab1.pack(anchor=tk.W)
-
-        self.friend_tree = ttk.Treeview(self.left, columns=("status",), show='headings', height=10)
-        self.friend_tree.heading("status", text="Bạn bè (Online/Offline)")
-        self.friend_tree.pack(fill=tk.X, pady=4)
-        self.friend_tree.bind('<Double-1>', self._on_friend_double_click)
-
-        fr_btns = ttk.Frame(self.left)
-        fr_btns.pack(fill=tk.X, pady=2)
-        ttk.Button(fr_btns, text="Xóa bạn", command=self._remove_friend).pack(side=tk.LEFT, padx=2)
-
-        # Tìm bạn + gửi lời mời
-        ttk.Label(self.left, text="Tìm người dùng").pack(anchor=tk.W, pady=(8, 2))
-        find_box = ttk.Frame(self.left)
-        find_box.pack(fill=tk.X)
-        self.var_search_user = tk.StringVar()
-        ttk.Entry(find_box, textvariable=self.var_search_user).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(find_box, text="Tìm", command=self._search_users).pack(side=tk.LEFT, padx=4)
-
-        self.search_result = ttk.Treeview(self.left, columns=("user",), show='headings', height=6)
-        self.search_result.heading("user", text="Kết quả tìm kiếm")
-        self.search_result.pack(fill=tk.X, pady=2)
-
-        ttk.Button(self.left, text="Gửi lời mời kết bạn", command=self._send_friend_request).pack(anchor=tk.W, pady=2)
-
-        # Lời mời kết bạn
-        ttk.Label(self.left, text="Lời mời kết bạn đến", font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, pady=(8,2))
-        self.req_list = ttk.Treeview(self.left, columns=("from",), show='headings', height=5)
-        self.req_list.heading("from", text="Từ người dùng")
-        self.req_list.pack(fill=tk.X)
-
-        req_btns = ttk.Frame(self.left)
-        req_btns.pack(fill=tk.X, pady=2)
-        ttk.Button(req_btns, text="Chấp nhận", command=lambda: self._respond_friend_request(True)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(req_btns, text="Từ chối", command=lambda: self._respond_friend_request(False)).pack(side=tk.LEFT, padx=2)
-
-        # ---- Room section ----
-        ttk.Label(self.left, text="Phòng chat", font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, pady=(10,2))
-        self.room_tree = ttk.Treeview(self.left, columns=("room",), show='headings', height=8)
-        self.room_tree.heading("room", text="Danh sách phòng")
-        self.room_tree.pack(fill=tk.X)
-        self.room_tree.bind('<Double-1>', self._on_room_double_click)
-
-        room_btns = ttk.Frame(self.left)
-        room_btns.pack(fill=tk.X, pady=4)
-        ttk.Button(room_btns, text="Tạo phòng", command=self._create_room_dialog).pack(side=tk.LEFT, padx=2)
-        ttk.Button(room_btns, text="Tham gia phòng", command=self._join_room_dialog).pack(side=tk.LEFT, padx=2)
-        ttk.Button(room_btns, text="Rời phòng", command=self._leave_selected_room).pack(side=tk.LEFT, padx=2)
-        ttk.Button(room_btns, text="Mời vào phòng", command=self._invite_to_room_dialog).pack(side=tk.LEFT, padx=2)
-
-        # ---- Right: Tabs chat ----
-        self.tabs = ttk.Notebook(self.right)
-        self.tabs.pack(fill=tk.BOTH, expand=True)
-
-        # Bottom bar: tìm kiếm toàn cục theo tab hiện tại
-        bottom = ttk.Frame(self.right)
-        bottom.pack(fill=tk.X)
-        ttk.Label(bottom, text="Tìm trong hội thoại hiện tại:").pack(side=tk.LEFT, padx=4)
-        self.var_search_chat = tk.StringVar()
-        e = ttk.Entry(bottom, textvariable=self.var_search_chat, width=30)
-        e.pack(side=tk.LEFT)
-        ttk.Button(bottom, text="Tìm", command=self._search_in_current_chat).pack(side=tk.LEFT, padx=4)
-
-        # Tải danh bạ/ phòng lần đầu
-        self._request_friend_list()
-
-    # -------------------- Helper: mở tab chat --------------------
-    def _open_chat_tab(self, to_type: str, to_id: str, title: Optional[str] = None):
-        key = (to_type, to_id)
-        if key in self.chat_tabs:
-            tab = self.chat_tabs[key]
-            self.tabs.select(tab.frame)
-            return tab
-        tab = ChatTab(self, to_type=to_type, to_id=to_id, title=title or f"{to_type}:{to_id}")
-        self.chat_tabs[key] = tab
-        self.tabs.add(tab.frame, text=tab.title)
-        self.tabs.select(tab.frame)
-        return tab
-
-    # -------------------- Sự kiện UI --------------------
-    def _disconnect(self):
-        try:
-            self.client.close()
-        except Exception:
-            pass
-        messagebox.showinfo("Ngắt kết nối", "Đã ngắt kết nối khỏi server")
-
-    def _on_friend_double_click(self, event):
-        item = self.friend_tree.selection()
-        if not item:
-            return
-        username = self.friend_tree.item(item[0], 'values')[0]
-        self._open_chat_tab('user', username, title=f"👤 {username}")
-
-    def _on_room_double_click(self, event):
-        item = self.room_tree.selection()
-        if not item:
-            return
-        room_id = self.room_tree.item(item[0], 'values')[0]
-        room_name = self.rooms.get(room_id, {}).get('name', room_id)
-        self._open_chat_tab('room', room_id, title=f"# {room_name}")
-
-    def _remove_friend(self):
-        item = self.friend_tree.selection()
-        if not item:
-            messagebox.showwarning("Chọn bạn", "Hãy chọn một người bạn để xóa")
-            return
-        username = self.friend_tree.item(item[0], 'values')[0]
-        if messagebox.askyesno("Xác nhận", f"Xóa {username} khỏi danh sách bạn?"):
-            rid = self.client.next_req_id()
-            self.client.send_json({
-                "type": "request",
-                "req_id": rid,
-                "action": "remove_friend",
-                "username": username
-            })
-
-    def _search_users(self):
-        q = self.var_search_user.get().strip()
-        if not q:
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "search_users",
-            "query": q
-        })
-
-    def _send_friend_request(self):
-        sel = self.search_result.selection()
-        if not sel:
-            messagebox.showwarning("Chưa chọn", "Hãy chọn một user trong kết quả tìm kiếm")
-            return
-        username = self.search_result.item(sel[0], 'values')[0]
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "send_friend_request",
-            "to": username
-        })
-        messagebox.showinfo("Đã gửi", f"Đã gửi lời mời kết bạn tới {username}")
-
-    def _respond_friend_request(self, accept: bool):
-        sel = self.req_list.selection()
-        if not sel:
-            messagebox.showwarning("Chưa chọn", "Chọn một lời mời để phản hồi")
-            return
-        from_user = self.req_list.item(sel[0], 'values')[0]
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "respond_friend_request",
-            "from": from_user,
-            "accept": accept
-        })
-        # xóa khỏi UI ngay, server cũng sẽ gửi cập nhật danh bạ
-        self.req_list.delete(sel[0])
-
-    def _create_room_dialog(self):
-        d = SimpleInputDialog(self.root, title="Tạo phòng", prompt="Tên phòng:") # type: ignore
-        self.root.wait_window(d.top)
-        name = d.value
-        if not name:
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "create_room",
-            "room_name": name
-        })
-
-    def _join_room_dialog(self):
-        d = SimpleInputDialog(self.root, title="Tham gia phòng", prompt="Nhập Room ID:") # type: ignore
-        self.root.wait_window(d.top)
-        rid_str = d.value
-        if not rid_str:
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "join_room",
-            "room_id": rid_str
-        })
-
-    def _leave_selected_room(self):
-        sel = self.room_tree.selection()
-        if not sel:
-            messagebox.showwarning("Chưa chọn", "Chọn một phòng để rời")
-            return
-        room_id = self.room_tree.item(sel[0], 'values')[0]
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "leave_room",
-            "room_id": room_id
-        })
-
-    def _invite_to_room_dialog(self):
-        sel = self.room_tree.selection()
-        if not sel:
-            messagebox.showwarning("Chưa chọn", "Chọn một phòng để mời")
-            return
-        room_id = self.room_tree.item(sel[0], 'values')[0]
-        d = SimpleInputDialog(self.root, title="Mời vào phòng", prompt="Nhập username cần mời:") # type: ignore
-        self.root.wait_window(d.top)
-        username = d.value
-        if not username:
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "invite_to_room",
-            "room_id": room_id,
-            "username": username
-        })
-
-    def _search_in_current_chat(self):
-        key = self._current_tab_key()
-        if not key:
-            return
-        tab = self.chat_tabs.get(key)
-        if not tab:
-            return
-        kw = self.var_search_chat.get().strip()
-        tab.search_keyword(kw)
-
-    def _current_tab_key(self) -> Optional[tuple]:
-        cur = self.tabs.select()
-        for k, tab in self.chat_tabs.items():
-            if str(tab.frame) == cur:
-                return k
-        return None
-
-    def _request_friend_list(self):
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "get_friend_list",
-        })
-
-    # -------------------- Xử lý sự kiện mạng trên GUI thread --------------------
-    def _handle_event_on_gui(self, obj: Dict[str, Any]):
-        t = obj.get("type")
-        if t == "response":
-            action = obj.get("action")
-            ok = obj.get("ok", False)
-            data = obj.get("data") or {}
-            msg = obj.get("message") or ""
-            if action == "register":
-                if ok:
-                    self.login_status.config(text="Đăng ký thành công. Giờ hãy đăng nhập.")
-                else:
-                    messagebox.showerror("Đăng ký thất bại", msg)
-            elif action == "login":
-                if ok:
-                    self.me = data.get("username") or self.var_user.get().strip()
-                    self.token = data.get("token")
-                    # data có thể chứa friends, rooms, requests...
-                    self._build_main_ui()
-                    self._apply_initial_payload(data)
-                    messagebox.showinfo("Thành công", f"Đăng nhập thành công: {self.me}")
-                else:
-                    messagebox.showerror("Đăng nhập thất bại", msg)
-                    self.login_status.config(text="Đăng nhập thất bại")
-            elif action == "get_friend_list":
-                if ok:
-                    self._update_friend_list(data)
-            elif action == "search_users":
-                self._update_search_results(data if ok else {"users": []})
-            elif action in ("send_friend_request", "respond_friend_request", "remove_friend"):
-                # Server có thể đẩy cập nhật riêng, ở đây chỉ hiện thông báo
-                if ok:
-                    self._request_friend_list()
-                else:
-                    messagebox.showerror("Lỗi", obj.get("message") or action)
-            elif action in ("create_room", "join_room", "leave_room", "invite_to_room"):
-                if ok:
-                    # refresh rooms nếu server trả về
-                    self._update_rooms(data)
-                    if action == "create_room":
-                        rid = data.get("room_id")
-                        name = data.get("room_name")
-                        if rid:
-                            self._open_chat_tab('room', str(rid), title=f"# {name or rid}")
-                else:
-                    messagebox.showerror("Lỗi phòng", obj.get("message") or action)
-            elif action == "send_message":
-                if not ok:
-                    messagebox.showerror("Gửi thất bại", msg)
-            elif action == "typing":
-                # không hiện gì
-                pass
-            else:
-                # các action khác
-                if not ok:
-                    print("Response lỗi:", action, msg)
-
-        elif t == "event":
-            ev = obj.get("event")
-            data = obj.get("data") or {}
-            if ev == "message":
-                self._handle_incoming_message(data)
-            elif ev == "presence_update":
-                # data: {"username": str, "online": bool}
-                u = data.get("username")
-                onl = data.get("online")
-                if u:
-                    if u not in self.friends:
-                        self.friends[u] = {"online": bool(onl)}
-                    else:
-                        self.friends[u]["online"] = bool(onl)
-                    self._render_friend_tree()
-            elif ev == "friend_request":
-                from_user = data.get("from")
-                if from_user:
-                    self.friend_requests_inbox.append(from_user)
-                    self._render_friend_requests()
-                    self._notify(f"Lời mời kết bạn từ {from_user}")
-            elif ev == "friend_update":
-                # ví dụ server đẩy full friend list
-                self._update_friend_list(data)
-            elif ev == "room_update":
-                # cập nhật danh sách phòng
-                self._update_rooms(data)
-            elif ev == "disconnected":
-                messagebox.showwarning("Mất kết nối", "Đã mất kết nối tới server")
-            else:
-                # ignore
-                pass
-
-        else:
-            # unknown
-            pass
-
-    # -------------------- Áp payload ban đầu sau login --------------------
-    def _apply_initial_payload(self, data: Dict[str, Any]):
-        # friends
-        self._update_friend_list(data)
-        # rooms
-        self._update_rooms(data)
-        # friend requests
-        inbox = data.get("friend_requests_inbox") or []
-        self.friend_requests_inbox = list(inbox)
-        self._render_friend_requests()
-
-    # -------------------- Friends --------------------
-    def _update_friend_list(self, data: Dict[str, Any]):
-        friends = data.get("friends") or []
-        newmap = {}
-        for f in friends:
-            if isinstance(f, dict):
-                username = f.get("username")
-                online = f.get("online", False)
-            else:
-                username = str(f)
-                online = False
-            if not username:
-                continue
-            newmap[username] = {"online": bool(online)}
-        self.friends = newmap
-        self._render_friend_tree()
-
-    def _render_friend_tree(self):
-        for i in self.friend_tree.get_children():
-            self.friend_tree.delete(i)
-        # Sắp xếp online trước
-        sorted_items = sorted(self.friends.items(), key=lambda kv: (not kv[1].get('online', False), kv[0].lower()))
-        for u, info in sorted_items:
-            status = "Online" if info.get('online') else "Offline"
-            self.friend_tree.insert('', tk.END, values=(u,), tags=(status,))
-        # style tags
-        self.friend_tree.tag_configure('Online', background='#E8FFE8')
-        self.friend_tree.tag_configure('Offline', background='#F8F8F8')
-
-    def _update_search_results(self, data: Dict[str, Any]):
-        users = data.get("users") or []
-        for i in self.search_result.get_children():
-            self.search_result.delete(i)
-        for u in users:
-            if isinstance(u, dict):
-                uname = u.get("username")
-            else:
-                uname = str(u)
-            if uname and uname != self.me:
-                self.search_result.insert('', tk.END, values=(uname,))
-
-    def _render_friend_requests(self):
-        for i in self.req_list.get_children():
-            self.req_list.delete(i)
-        for u in self.friend_requests_inbox:
-            self.req_list.insert('', tk.END, values=(u,))
-
-    # -------------------- Rooms --------------------
-    def _update_rooms(self, data: Dict[str, Any]):
-        rooms = data.get("rooms") or []
-        newmap = {}
-        for r in rooms:
-            if isinstance(r, dict):
-                rid = str(r.get("room_id"))
-                name = r.get("room_name") or rid
-            else:
-                rid = str(r)
-                name = rid
-            newmap[rid] = {"name": name}
-        self.rooms = newmap
-        self._render_room_tree()
-
-    def _render_room_tree(self):
-        for i in self.room_tree.get_children():
-            self.room_tree.delete(i)
-        # Sắp xếp theo tên
-        sorted_items = sorted(self.rooms.items(), key=lambda kv: kv[1].get('name','').lower())
-        for rid, info in sorted_items:
-            self.room_tree.insert('', tk.END, values=(rid,))
-
-    # -------------------- Xử lý tin nhắn đến --------------------
-    def _handle_incoming_message(self, data: Dict[str, Any]):
-        from_user = data.get("from") or "?"
-        to_type = data.get("to_type") or "user"
-        to_id = str(data.get("to"))
-        msg_type = data.get("msg_type") or "text"
-        content = data.get("content") or ""
-        filename = data.get("filename")
-        ts = int(data.get("timestamp") or now_ts())
-
-        # Xác định hội thoại (key)
-        key = None
-        if to_type == 'user':
-            # nếu tin nhắn gửi tới mình từ ai đó -> key là hội thoại với người đó
-            if to_id == self.me:
-                key = ('user', from_user)
-            # nếu tin do mình gửi, server có thể echo lại -> key là người nhận
-            elif from_user == self.me:
-                key = ('user', to_id)
-            else:
-                # fallback
-                key = ('user', from_user)
-        else:
-            key = ('room', to_id)
-
-        # Lưu lịch sử
-        msg = ChatMessage(sender=from_user, to_type=key[0], to_id=key[1], msg_type=msg_type, content=content, filename=filename, timestamp=ts)
-        self.history.setdefault(key, []).append(msg)
-
-        # Mở tab nếu chưa có
-        if key not in self.chat_tabs:
-            title = f"👤 {key[1]}" if key[0] == 'user' else f"# {self.rooms.get(key[1],{}).get('name', key[1])}"
-            tab = self._open_chat_tab(key[0], key[1], title=title)
-        else:
-            tab = self.chat_tabs[key]
-
-        # Render
-        tab.append_message(msg)
-
-        # Nếu tab không phải tab hiện tại -> gắn dấu * thông báo và kêu chuông
-        current = self._current_tab_key()
-        if current != key:
-            self._set_tab_badge(tab, True)
-            self._notify("Tin nhắn mới")
-
-    def _set_tab_badge(self, tab: 'ChatTab', badged: bool):
-        # Đổi tiêu đề tab: thêm * khi có tin mới
-        idx = self.tabs.index(tab.frame)
-        title = tab.title
-        if badged and not title.endswith(" *"):
-            title += " *"
-        if (not badged) and title.endswith(" *"):
-            title = title[:-2]
-        tab.title = title
-        self.tabs.tab(idx, text=title)
-
-    def _notify(self, text: str):
-        try:
-            self.root.bell()
-        except Exception:
-            pass
-
-    # -------------------- Gửi tin nhắn/typing từ ChatTab --------------------
-    def send_text(self, to_type: str, to_id: str, text: str):
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "send_message",
-            "to_type": to_type,
-            "to": to_id,
-            "msg_type": "text",
-            "content": text
-        })
-
-    def send_image(self, to_type: str, to_id: str, filepath: str):
-        try:
-            with open(filepath, 'rb') as f:
-                b = f.read()
-            b64 = base64.b64encode(b).decode('ascii')
-            filename = os.path.basename(filepath)
-        except Exception as e:
-            messagebox.showerror("Lỗi đọc file", str(e))
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "send_message",
-            "to_type": to_type,
-            "to": to_id,
-            "msg_type": "image",
-            "content": b64,
-            "filename": filename
-        })
-
-    def send_file(self, to_type: str, to_id: str, filepath: str):
-        try:
-            with open(filepath, 'rb') as f:
-                b = f.read()
-            b64 = base64.b64encode(b).decode('ascii')
-            filename = os.path.basename(filepath)
-        except Exception as e:
-            messagebox.showerror("Lỗi đọc file", str(e))
-            return
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "send_message",
-            "to_type": to_type,
-            "to": to_id,
-            "msg_type": "file",
-            "content": b64,
-            "filename": filename
-        })
-
-    def send_typing(self, to_type: str, to_id: str, is_typing: bool):
-        rid = self.client.next_req_id()
-        self.client.send_json({
-            "type": "request",
-            "req_id": rid,
-            "action": "typing",
-            "to_type": to_type,
-            "to": to_id,
-            "is_typing": bool(is_typing)
-        })
-
-    # -------------------- Main loop --------------------
-    def run(self):
-        self.root.mainloop()
-
-
-# ============================ ChatTab ============================
-
-class ChatTab:
-    def __init__(self, app: ChatGUI, to_type: str, to_id: str, title: str):
-        self.app = app
-        self.to_type = to_type
-        self.to_id = to_id
-        self.title = title
-        self.frame = ttk.Frame(app.tabs)
-
-        # Danh sách PhotoImage giữ tham chiếu để ảnh không bị GC
-        self._images: List[Any] = []
-
-        # Lịch sử local cho tab này
-        self.key = (to_type, to_id)
-        self.history = app.history.setdefault(self.key, [])
+        super().__init__()
+        self.title("Socket Chat Client")
+        self.geometry("1000x640")
+        self.minsize(900, 560)
+
+        self.net = NetClient(HOST, PORT, self.enqueue_event)
+        self.event_q = queue.Queue()
+
+        # State
+        self.username = None
+        self.current_chat = None  # ("dm", username) or ("room", roomname)
+        self.friends = {}         # name -> online(bool)
+        self.incoming = []        # pending requests
+        self.outgoing = []
+        self.rooms = []           # room list
+        self.unread = {}          # chat_id -> count
+        self.history = {}         # chat_id -> list of messages
+        self.images_cache = []    # keep references to PhotoImage
+        self.typing_labels = {}   # chat_id -> label text (who typing)
 
         # UI
-        self._build_ui()
+        self.build_login_ui()
+        self.after(100, self.process_events)
 
-        # typing throttle
-        self._last_type_send = 0.0
+    # ---------- Utilities ----------
+    def chat_id(self, kind, name):
+        return f"{kind}:{name}"
 
-    def _build_ui(self):
-        topbar = ttk.Frame(self.frame)
-        topbar.pack(fill=tk.X)
-        self.typing_label = ttk.Label(topbar, text="")
-        self.typing_label.pack(side=tk.LEFT, padx=4)
+    def enqueue_event(self, obj):
+        self.event_q.put(obj)
 
-        self.text = ScrolledText(self.frame, wrap=tk.WORD, state=tk.DISABLED, height=25)
-        self.text.pack(fill=tk.BOTH, expand=True, pady=4)
+    def process_events(self):
+        while not self.event_q.empty():
+            obj = self.event_q.get()
+            self.handle_event(obj)
+        self.after(100, self.process_events)
 
-        bottom = ttk.Frame(self.frame)
-        bottom.pack(fill=tk.X)
-
-        self.var_input = tk.StringVar()
-        entry = ttk.Entry(bottom, textvariable=self.var_input)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        entry.bind('<Return>', lambda e: self._send_text())
-        entry.bind('<KeyPress>', self._on_keypress)
-
-        ttk.Button(bottom, text="Gửi", command=self._send_text).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bottom, text="Ảnh", command=self._pick_image).pack(side=tk.LEFT)
-        ttk.Button(bottom, text="File", command=self._pick_file).pack(side=tk.LEFT, padx=2)
-
-        # Load lịch sử sẵn có (nếu có)
-        for m in self.history:
-            self.append_message(m, skip_store=True)
-
-        # clear badge khi mở
-        self.app._set_tab_badge(self, False)
-
-    def _on_keypress(self, event):
-        now = time.time()
-        if now - self._last_type_send > 1.0:
-            self.app.send_typing(self.to_type, self.to_id, True)
-            self._last_type_send = now
-        # ẩn label typing sau 2s nếu không có update
-        self.frame.after(2000, lambda: self.typing_label.config(text=""))
-
-    def _send_text(self):
-        text = self.var_input.get().strip()
-        if not text:
-            return
-        self.app.send_text(self.to_type, self.to_id, text)
-        # hiển thị ngay ở local
-        msg = ChatMessage(sender=self.app.me or "me", to_type=self.to_type, to_id=self.to_id, msg_type='text', content=text, timestamp=now_ts())
-        self.history.append(msg)
-        self.append_message(msg, skip_store=True)
-        self.var_input.set("")
-
-    def _pick_image(self):
-        fp = filedialog.askopenfilename(title="Chọn ảnh", filetypes=[("Ảnh", "*.png;*.jpg;*.jpeg;*.gif;*.bmp"), ("Tất cả", "*.*")])
-        if not fp:
-            return
-        self.app.send_image(self.to_type, self.to_id, fp)
-        # hiển thị local ngay
+    def safe_bell(self):
         try:
-            with open(fp, 'rb') as f:
-                b64 = base64.b64encode(f.read()).decode('ascii')
-            msg = ChatMessage(sender=self.app.me or "me", to_type=self.to_type, to_id=self.to_id, msg_type='image', content=b64, filename=os.path.basename(fp), timestamp=now_ts())
-            self.history.append(msg)
-            self.append_message(msg, skip_store=True)
-        except Exception as e:
-            messagebox.showerror("Lỗi ảnh", str(e))
+            self.bell()
+        except Exception:
+            pass
 
-    def _pick_file(self):
-        fp = filedialog.askopenfilename(title="Chọn file")
-        if not fp:
+    # ---------- Login/Register UI ----------
+    def build_login_ui(self):
+        self.login_frame = ttk.Frame(self)
+        self.login_frame.pack(fill="both", expand=True, padx=16, pady=16)
+
+        title = ttk.Label(self.login_frame, text="ỨNG DỤNG CHAT SOCKET", font=("Segoe UI", 18, "bold"))
+        title.pack(pady=10)
+
+        nb = ttk.Notebook(self.login_frame)
+        self.tab_login = ttk.Frame(nb)
+        self.tab_register = ttk.Frame(nb)
+        nb.add(self.tab_login, text="Đăng nhập")
+        nb.add(self.tab_register, text="Đăng ký")
+        nb.pack(fill="x", pady=10)
+
+        # Login
+        self.l_user = tk.StringVar()
+        self.l_pass = tk.StringVar()
+        ttk.Label(self.tab_login, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_login, textvariable=self.l_user, width=30).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(self.tab_login, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_login, textvariable=self.l_pass, show="•", width=30).grid(row=1, column=1, padx=6, pady=6)
+        ttk.Button(self.tab_login, text="Đăng nhập", command=self.do_login).grid(row=2, column=0, columnspan=2, pady=10)
+
+        # Register
+        self.r_user = tk.StringVar()
+        self.r_pass = tk.StringVar()
+        ttk.Label(self.tab_register, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_register, textvariable=self.r_user, width=30).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Label(self.tab_register, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Entry(self.tab_register, textvariable=self.r_pass, show="•", width=30).grid(row=1, column=1, padx=6, pady=6)
+        ttk.Button(self.tab_register, text="Tạo tài khoản", command=self.do_register).grid(row=2, column=0, columnspan=2, pady=10)
+
+        self.status_lbl = ttk.Label(self.login_frame, text="", foreground="#555")
+        self.status_lbl.pack(pady=6)
+
+    def do_register(self):
+        user = self.r_user.get().strip()
+        pw = self.r_pass.get()
+        if not user or not pw:
+            self.set_status("Vui lòng nhập đủ thông tin đăng ký.")
             return
-        self.app.send_file(self.to_type, self.to_id, fp)
-        # hiển thị local
         try:
-            with open(fp, 'rb') as f:
-                b64 = base64.b64encode(f.read()).decode('ascii')
-            msg = ChatMessage(sender=self.app.me or "me", to_type=self.to_type, to_id=self.to_id, msg_type='file', content=b64, filename=os.path.basename(fp), timestamp=now_ts())
-            self.history.append(msg)
-            self.append_message(msg, skip_store=True)
+            self.net.connect()
+            self.net.send("register", {"username": user, "password": pw})
         except Exception as e:
-            messagebox.showerror("Lỗi file", str(e))
+            messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
 
-    def append_message(self, m: ChatMessage, skip_store: bool=False):
-        if not skip_store:
-            self.history.append(m)
-        self.text.configure(state=tk.NORMAL)
-        ts = fmt_time(m.timestamp)
-        if m.msg_type == 'text':
-            prefix = f"[{ts}] {m.sender}: "
-            self.text.insert(tk.END, prefix + m.content + "\n")
-        elif m.msg_type == 'image':
-            # In dòng mô tả
-            line = f"[{ts}] {m.sender} gửi ảnh: {m.filename or ''}\n"
-            self.text.insert(tk.END, line)
-            # Hiển thị ảnh nếu có PIL
-            try:
-                imgdata = base64.b64decode(m.content)
-                if PIL_AVAILABLE:
-                    im = Image.open(io.BytesIO(imgdata))
-                    im.thumbnail((480, 480))
-                    tkimg = ImageTk.PhotoImage(im)
-                else:
-                    # Thử với PhotoImage nếu là PNG/GIF
-                    tkimg = tk.PhotoImage(data=base64.b64encode(imgdata))
-                self._images.append(tkimg)  # giữ tham chiếu
-                self.text.image_create(tk.END, image=tkimg)
-                self.text.insert(tk.END, "\n")
-            except Exception as e:
-                self.text.insert(tk.END, f"(Không thể hiển thị ảnh: {e})\n")
-        else:  # file
-            line = f"[{ts}] {m.sender} gửi file: {m.filename or 'file.bin'} (đính kèm {len(m.content)} base64)\n"
-            self.text.insert(tk.END, line)
-        self.text.see(tk.END)
-        self.text.configure(state=tk.DISABLED)
-        # clear badge nếu tab hiện tại
-        cur = self.app._current_tab_key()
-        if cur == self.key:
-            self.app._set_tab_badge(self, False)
+    def do_login(self):
+        user = self.l_user.get().strip()
+        pw = self.l_pass.get()
+        if not user or not pw:
+            self.set_status("Vui lòng nhập username & password.")
+            return
+        try:
+            self.net.connect()
+            self.net.send("login", {"username": user, "password": pw})
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
+
+    def set_status(self, text):
+        self.status_lbl.configure(text=text)
+
+    # ---------- Main UI after login ----------
+    def build_main_ui(self):
+        self.login_frame.destroy()
+
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        # Left panel
+        left = ttk.Frame(self, padding=6)
+        left.grid(row=0, column=0, sticky="nsw")
+        left.columnconfigure(0, weight=1)
+
+        me = ttk.Label(left, text=f"Xin chào, {self.username}", font=("Segoe UI", 12, "bold"))
+        me.grid(row=0, column=0, sticky="w", pady=(0,6))
+
+        # Friend controls
+        fr_controls = ttk.Frame(left)
+        fr_controls.grid(row=1, column=0, sticky="ew", pady=4)
+        ttk.Button(fr_controls, text="Thêm bạn", command=self.ui_add_friend).pack(side="left", padx=2)
+        ttk.Button(fr_controls, text="Yêu cầu kết bạn", command=self.ui_show_requests).pack(side="left", padx=2)
+
+        # Room controls
+        room_controls = ttk.Frame(left)
+        room_controls.grid(row=2, column=0, sticky="ew", pady=4)
+        ttk.Button(room_controls, text="Tạo phòng", command=self.ui_create_room).pack(side="left", padx=2)
+        ttk.Button(room_controls, text="Tham gia phòng", command=self.ui_join_room).pack(side="left", padx=2)
+
+        # Search users
+        search_controls = ttk.Frame(left)
+        search_controls.grid(row=3, column=0, sticky="ew", pady=4)
+        self.search_user_var = tk.StringVar()
+        ttk.Entry(search_controls, textvariable=self.search_user_var, width=18).pack(side="left", padx=2)
+        ttk.Button(search_controls, text="Tìm người dùng", command=self.ui_search_users).pack(side="left", padx=2)
+
+        # Tabs Friends / Rooms
+        self.nb_left = ttk.Notebook(left)
+        self.tab_friends = ttk.Frame(self.nb_left)
+        self.tab_rooms = ttk.Frame(self.nb_left)
+        self.nb_left.add(self.tab_friends, text="Bạn bè")
+        self.nb_left.add(self.tab_rooms, text="Phòng")
+        self.nb_left.grid(row=4, column=0, sticky="nsew", pady=(4,0))
+        left.rowconfigure(4, weight=1)
+
+        self.friends_list = tk.Listbox(self.tab_friends, width=28, height=20)
+        self.friends_list.pack(fill="both", expand=True)
+        self.friends_list.bind("<<ListboxSelect>>", self.on_friend_select)
+
+        self.rooms_list = tk.Listbox(self.tab_rooms, width=28, height=20)
+        self.rooms_list.pack(fill="both", expand=True)
+        self.rooms_list.bind("<<ListboxSelect>>", self.on_room_select)
+
+        # Right/chat panel
+        right = ttk.Frame(self, padding=6)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        # Header
+        hdr = ttk.Frame(right)
+        hdr.grid(row=0, column=0, sticky="ew")
+        self.chat_title = ttk.Label(hdr, text="(Chưa chọn hội thoại)", font=("Segoe UI", 12, "bold"))
+        self.chat_title.pack(side="left")
+        self.typing_lbl = ttk.Label(hdr, text="", foreground="#777")
+        self.typing_lbl.pack(side="right")
+
+        # Message area
+        self.msg_canvas = tk.Canvas(right, bg="#fbfbfb", highlightthickness=1, highlightbackground="#ddd")
+        self.msg_scroll = ttk.Scrollbar(right, orient="vertical", command=self.msg_canvas.yview)
+        self.msg_frame = ttk.Frame(self.msg_canvas)
+        self.msg_frame.bind("<Configure>", lambda e: self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all")))
+        self.msg_canvas.create_window((0,0), window=self.msg_frame, anchor="nw")
+        self.msg_canvas.configure(yscrollcommand=self.msg_scroll.set)
+        self.msg_canvas.grid(row=1, column=0, sticky="nsew", pady=(4,4))
+        self.msg_scroll.grid(row=1, column=1, sticky="ns", pady=(4,4))
+
+        # Message composer
+        comp = ttk.Frame(right)
+        comp.grid(row=2, column=0, sticky="ew")
+        self.input_var = tk.StringVar()
+        self.entry = ttk.Entry(comp, textvariable=self.input_var)
+        self.entry.pack(side="left", fill="x", expand=True, padx=2, pady=4)
+        self.entry.bind("<KeyPress>", self.on_typing_keypress)
+        ttk.Button(comp, text="Ảnh", command=self.ui_send_image).pack(side="left", padx=2)
+        ttk.Button(comp, text="File", command=self.ui_send_file).pack(side="left", padx=2)
+        ttk.Button(comp, text="Gửi", command=self.ui_send_text).pack(side="left", padx=2)
+
+        # Search in history (keyword + date)
+        sr = ttk.Frame(right)
+        sr.grid(row=3, column=0, sticky="ew", pady=(4,0))
+        ttk.Label(sr, text="Tìm tin nhắn:").pack(side="left")
+        self.search_kw = tk.StringVar()
+        ttk.Entry(sr, textvariable=self.search_kw, width=24).pack(side="left", padx=4)
+        ttk.Label(sr, text="Từ ngày (YYYY-MM-DD):").pack(side="left")
+        self.search_from = tk.StringVar()
+        ttk.Entry(sr, textvariable=self.search_from, width=12).pack(side="left", padx=2)
+        ttk.Label(sr, text="Đến ngày:").pack(side="left")
+        self.search_to = tk.StringVar()
+        ttk.Entry(sr, textvariable=self.search_to, width=12).pack(side="left", padx=2)
+        ttk.Button(sr, text="Tìm", command=self.ui_search_history).pack(side="left", padx=6)
+
+        # Ask server initial lists
+        self.net.send("list_friends", {})
+        self.net.send("list_rooms", {})
+
+    # ---------- UI actions ----------
+    def on_friend_select(self, _evt):
+        sel = self.friends_list.curselection()
+        if not sel: return
+        item = self.friends_list.get(sel[0])
+        uname = item.split(" ")[0]
+        self.open_chat("dm", uname)
+
+    def on_room_select(self, _evt):
+        sel = self.rooms_list.curselection()
+        if not sel: return
+        room = self.rooms_list.get(sel[0]).split(" ")[0]
+        self.open_chat("room", room)
+
+    def open_chat(self, kind, name):
+        self.current_chat = (kind, name)
+        self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {name}")
+        self.typing_lbl.configure(text="")
+        cid = self.chat_id(kind, name)
+        self.unread[cid] = 0
+        self.refresh_lists()
+        # fetch history if not cached
+        if cid not in self.history:
+            self.net.send("fetch_history", {"target_type": kind, "to": name, "limit": 200})
+        else:
+            self.render_messages(cid)
+
+    def ui_add_friend(self):
+        top = tk.Toplevel(self)
+        top.title("Thêm bạn")
+        tk.Label(top, text="Nhập username:").pack(padx=8, pady=8)
+        v = tk.StringVar()
+        e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
+        def ok():
+            name = v.get().strip()
+            if name:
+                self.net.send("friend_request", {"to": name})
+            top.destroy()
+        ttk.Button(top, text="Gửi lời mời", command=ok).pack(padx=8, pady=8)
+
+    def ui_show_requests(self):
+        top = tk.Toplevel(self)
+        top.title("Yêu cầu kết bạn")
+        frm = ttk.Frame(top); frm.pack(padx=8, pady=8)
+        ttk.Label(frm, text="Đang chờ bạn chấp nhận:").grid(row=0, column=0, sticky="w")
+        lb_in = tk.Listbox(frm, width=24, height=8); lb_in.grid(row=1, column=0, padx=4, pady=4)
+        for u in self.incoming: lb_in.insert("end", u)
+        ttk.Button(frm, text="Chấp nhận", command=lambda: self._act_req(lb_in, True)).grid(row=2, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(frm, text="Từ chối", command=lambda: self._act_req(lb_in, False)).grid(row=3, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Label(frm, text="Bạn đã gửi:").grid(row=0, column=1, sticky="w")
+        lb_out = tk.Listbox(frm, width=24, height=8); lb_out.grid(row=1, column=1, padx=4, pady=4)
+        for u in self.outgoing: lb_out.insert("end", u)
+        ttk.Button(frm, text="Đóng", command=top.destroy).grid(row=4, column=0, columnspan=2, pady=6)
+
+    def _act_req(self, lb: tk.Listbox, accept: bool):
+        sel = lb.curselection()
+        if not sel: return
+        u = lb.get(sel[0])
+        if accept:
+            self.net.send("friend_accept", {"from": u})
+        else:
+            self.net.send("friend_decline", {"from": u})
+
+    def ui_create_room(self):
+        top = tk.Toplevel(self); top.title("Tạo phòng")
+        v = tk.StringVar()
+        ttk.Label(top, text="Tên phòng:").pack(padx=8, pady=8)
+        e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
+        def ok():
+            name = v.get().strip()
+            if name:
+                self.net.send("create_room", {"room": name})
+            top.destroy()
+        ttk.Button(top, text="Tạo", command=ok).pack(padx=8, pady=8)
+
+    def ui_join_room(self):
+        top = tk.Toplevel(self); top.title("Tham gia phòng")
+        v = tk.StringVar()
+        ttk.Label(top, text="Tên phòng:").pack(padx=8, pady=8)
+        e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
+        def ok():
+            name = v.get().strip()
+            if name:
+                self.net.send("join_room", {"room": name})
+            top.destroy()
+        ttk.Button(top, text="Tham gia", command=ok).pack(padx=8, pady=8)
+
+    def ui_search_users(self):
+        q = self.search_user_var.get().strip()
+        self.net.send("search_users", {"query": q})
+
+    def ui_send_text(self):
+        if not self.current_chat: return
+        text = self.input_var.get().strip()
+        if not text: return
+        kind, name = self.current_chat
+        self.net.send("send_message", {"target_type": kind, "to": name, "msgtype":"text", "content": text})
+        self.input_var.set("")
+
+    def ui_send_image(self):
+        if not self.current_chat: return
+        path = filedialog.askopenfilename(title="Chọn ảnh PNG/GIF", filetypes=[("Ảnh", "*.png *.gif"), ("Tất cả", "*.*")])
+        if not path: return
+        with open(path, "rb") as f:
+            b = f.read()
+        b64 = base64.b64encode(b).decode("ascii")
+        kind, name = self.current_chat
+        self.net.send("send_message", {"target_type": kind, "to": name, "msgtype":"image", "filename": os.path.basename(path), "data_base64": b64})
+
+    def ui_send_file(self):
+        if not self.current_chat: return
+        path = filedialog.askopenfilename(title="Chọn file đính kèm")
+        if not path: return
+        with open(path, "rb") as f:
+            b = f.read()
+        b64 = base64.b64encode(b).decode("ascii")
+        kind, name = self.current_chat
+        self.net.send("send_message", {"target_type": kind, "to": name, "msgtype":"file", "filename": os.path.basename(path), "data_base64": b64})
+
+    def ui_search_history(self):
+        if not self.current_chat: return
+        kw = self.search_kw.get().strip()
+        d1 = self.search_from.get().strip() or None
+        d2 = self.search_to.get().strip() or None
+        kind, name = self.current_chat
+        self.net.send("search_history", {"target_type": kind, "to": name, "keyword": kw, "date_from": d1, "date_to": d2})
+
+    # typing indicator
+    def on_typing_keypress(self, _evt):
+        if not self.current_chat: return
+        # Send lightweight typing event
+        kind, name = self.current_chat
+        self.net.send("typing", {"target_type": kind, "to": name, "is_typing": True})
+
+    # ---------- Render ----------
+    def clear_messages(self):
+        for w in self.msg_frame.winfo_children():
+            w.destroy()
+        self.images_cache.clear()
+
+    def render_messages(self, cid):
+        self.clear_messages()
+        msgs = self.history.get(cid, [])
+        for m in msgs:
+            who = m.get("from")
+            ts = m.get("ts","")[:19].replace("T"," ")
+            left = (who != self.username)
+            bubble = ttk.Frame(self.msg_frame)
+            bubble.pack(anchor="w" if left else "e", fill="x", pady=2, padx=8)
+            head = ttk.Label(bubble, text=f"{who} • {ts}", foreground="#555")
+            head.pack(anchor="w" if left else "e")
+            # content
+            if m.get("msgtype") == "text":
+                body = tk.Text(bubble, height=2, wrap="word", relief="flat", bg="#f6f6f6")
+                body.insert("1.0", m.get("content",""))
+                body.configure(state="disabled")
+                body.pack(fill="x")
+            elif m.get("msgtype") == "image":
+                fname = m.get("filename","")
+                data = m.get("data_base64")
+                lbl = ttk.Label(bubble, text=f"[Ảnh] {fname}")
+                lbl.pack(anchor="w")
+                # show PNG/GIF inline if possible
+                ext = os.path.splitext(fname.lower())[1]
+                if ext in [".png", ".gif"]:
+                    try:
+                        img = tk.PhotoImage(data=base64.b64decode(data))
+                    except Exception:
+                        # Some Tk versions require file=, fallback to temp
+                        tmp = os.path.join(os.getcwd(), f"tmp_{fname}")
+                        with open(tmp, "wb") as f:
+                            f.write(base64.b64decode(data))
+                        img = tk.PhotoImage(file=tmp)
+                    self.images_cache.append(img)
+                    img_lbl = tk.Label(bubble, image=img, bd=1, relief="solid")
+                    img_lbl.pack(anchor="w", pady=2)
+                btn = ttk.Button(bubble, text="Lưu ảnh", command=lambda d=data, fn=fname: self.save_bytes(d, fn))
+                btn.pack(anchor="w")
+            elif m.get("msgtype") == "file":
+                fname = m.get("filename","(file)")
+                ttk.Label(bubble, text=f"[File] {fname}").pack(anchor="w")
+                ttk.Button(bubble, text="Lưu file", command=lambda d=m.get("data_base64"), fn=fname: self.save_bytes(d, fn)).pack(anchor="w")
+            elif m.get("msgtype") == "typing":
+                # ignored in history rendering
+                pass
+
+        self.msg_canvas.update_idletasks()
+        self.msg_canvas.yview_moveto(1.0)
+
+    def save_bytes(self, data_b64, filename):
+        if not data_b64: return
+        path = filedialog.asksaveasfilename(initialfile=filename, title="Lưu")
+        if not path: return
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(data_b64))
+        messagebox.showinfo("Lưu file", f"Đã lưu: {path}")
+
+    def refresh_lists(self):
+        # friends
+        self.friends_list.delete(0, "end")
+        for u in sorted(self.friends.keys()):
+            status = "🟢" if self.friends[u] else "⚫"
+            cid = self.chat_id("dm", u)
+            unread = self.unread.get(cid, 0)
+            dot = f"  ({unread})" if unread else ""
+            self.friends_list.insert("end", f"{u} {status}{dot}")
+        # rooms
+        self.rooms_list.delete(0, "end")
+        for r in sorted(self.rooms):
+            cid = self.chat_id("room", r)
+            unread = self.unread.get(cid, 0)
+            dot = f"  ({unread})" if unread else ""
+            self.rooms_list.insert("end", f"{r}{dot}")
+
+    # ---------- Event handler from server ----------
+    def handle_event(self, obj):
+        t = obj.get("type")
+        if t == "system":
+            msg = obj.get("message","")
+            if not self.username:
+                self.set_status(msg)
+            else:
+                messagebox.showinfo("Hệ thống", msg)
+        elif t == "register":
+            if obj.get("ok"):
+                self.set_status("Đăng ký thành công. Vui lòng đăng nhập.")
+            else:
+                self.set_status(f"Đăng ký thất bại: {obj.get('error')}")
+        elif t == "login":
+            if obj.get("ok"):
+                self.username = obj.get("username")
+                self.build_main_ui()
+                self.set_status("")
+            else:
+                self.set_status(f"Đăng nhập thất bại: {obj.get('error')}")
+        elif t == "friend_list":
+            self.friends = {f["username"]: bool(f["online"]) for f in obj.get("friends", [])}
+            self.incoming = obj.get("incoming", [])
+            self.outgoing = obj.get("outgoing", [])
+            self.refresh_lists()
+        elif t == "friend_request":
+            who = obj.get("from")
+            self.incoming.append(who)
+            self.safe_bell()
+            messagebox.showinfo("Yêu cầu kết bạn", f"{who} muốn kết bạn.")
+            self.net.send("list_friends", {})
+        elif t in ("friend_accept","friend_decline","friend_remove"):
+            self.net.send("list_friends", {})
+        elif t == "room_list":
+            self.rooms = obj.get("rooms", [])
+            self.refresh_lists()
+        elif t == "room_update":
+            self.net.send("list_rooms", {})
+        elif t == "presence":
+            u = obj.get("user")
+            on = bool(obj.get("online"))
+            if u in self.friends:
+                self.friends[u] = on
+                self.refresh_lists()
+        elif t == "new_message":
+            m = obj.get("message", {})
+            kind = m.get("target_type")
+            to = m.get("to")
+            sender = m.get("from")
+            # Determine chat target where the msg belongs
+            if kind == "dm":
+                chat_partner = sender if sender != self.username else to
+                cid = self.chat_id("dm", chat_partner)
+            else:
+                cid = self.chat_id("room", to)
+
+            lst = self.history.setdefault(cid, [])
+            # typing events are not stored in history
+            if m.get("msgtype") != "typing":
+                lst.append(m)
+
+            # Update typing indicator
+            if m.get("msgtype") == "typing":
+                if self.current_chat and self.chat_id(*self.current_chat) in (cid,):
+                    who = m.get("from")
+                    self.typing_lbl.configure(text=f"{who} đang nhập...")
+                    # clear after 1.2s
+                    self.after(1200, lambda: self.typing_lbl.configure(text=""))
+                return
+
+            # Unread count if not active
+            if not self.current_chat or self.chat_id(*self.current_chat) != cid:
+                self.unread[cid] = self.unread.get(cid, 0) + 1
+                self.refresh_lists()
+                self.safe_bell()
+            else:
+                self.render_messages(cid)
+        elif t == "fetch_history":
+            if obj.get("ok"):
+                # determine cid from messages list by first item or fallback to current
+                msgs = obj.get("messages", [])
+                if self.current_chat:
+                    cid = self.chat_id(*self.current_chat)
+                    self.history[cid] = msgs
+                    self.render_messages(cid)
+        elif t == "search_users":
+            res = obj.get("results", [])
+            top = tk.Toplevel(self); top.title("Kết quả tìm kiếm người dùng")
+            lb = tk.Listbox(top, width=30, height=12); lb.pack(padx=8, pady=8)
+            for u in res:
+                if u != self.username:
+                    lb.insert("end", u)
+            ttk.Button(top, text="Kết bạn", command=lambda: self._req_from_list(lb, top)).pack(pady=6)
+        elif t == "search_history":
+            if not self.current_chat: return
+            cid = self.chat_id(*self.current_chat)
+            msgs = obj.get("messages", [])
+            self.history[cid] = msgs
+            self.render_messages(cid)
+        else:
+            # ignore unknown
+            pass
+
+    def _req_from_list(self, lb, top):
+        sel = lb.curselection()
+        if not sel: return
+        u = lb.get(sel[0])
+        self.net.send("friend_request", {"to": u})
+        top.destroy()
+
+# ------------- Run -------------
+if __name__ == "__main__":
+    app = ChatApp()
+    app.mainloop()
