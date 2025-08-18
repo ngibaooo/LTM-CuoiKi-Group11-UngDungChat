@@ -89,14 +89,17 @@ class ChatApp(tk.Tk):
         self.friends = {}
         self.incoming = []                    # danh sách id đang mời mình
         self.outgoing = []                    # danh sách id mình đã mời
-        self.rooms = []
-        self.current_chat = None
-        self.history = {}
+
+        # rooms: dict[room_id] = room_name
+        self.rooms = {}
+        self.current_chat = None              # ("dm", id) hoặc ("room", room_id)
+        self.history = {}                     # key = "dm:id" | "room:room_id" -> list messages
         self.unread = {}
         self.images_cache = []
 
         # mapping hiển thị
         self.friend_index = []                # listbox index -> friend id
+        self.room_index = []                  # listbox index -> room_id
         self.search_index = []                # listbox index -> search result id
 
         # containers
@@ -160,7 +163,6 @@ class ChatApp(tk.Tk):
             return
         try:
             self.net.connect()
-            # GỬI full_name kèm username & password
             self.net.send("register", {"username": u, "password": p, "full_name": name})
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
@@ -200,7 +202,8 @@ class ChatApp(tk.Tk):
 
         room_controls = ttk.Frame(left); room_controls.grid(row=2, column=0, sticky="ew", pady=4)
         ttk.Button(room_controls, text="Tạo phòng", command=self.ui_create_room).pack(side="left", padx=2)
-        ttk.Button(room_controls, text="Tham gia phòng", command=self.ui_join_room).pack(side="left", padx=2)
+        ttk.Button(room_controls, text="Tham gia phòng (ID)", command=self.ui_join_room).pack(side="left", padx=2)
+        ttk.Button(room_controls, text="Rời phòng", command=self.ui_leave_room).pack(side="left", padx=2)
 
         # search users by login ID
         search_controls = ttk.Frame(left); search_controls.grid(row=3, column=0, sticky="ew", pady=4)
@@ -263,12 +266,13 @@ class ChatApp(tk.Tk):
         self.friends = {}
         self.incoming = []
         self.outgoing = []
-        self.rooms = []
+        self.rooms = {}
         self.current_chat = None
         self.history = {}
         self.unread = {}
         self.images_cache = []
         self.friend_index = []
+        self.room_index = []
         self.search_index = []
 
     def reset_to_login(self):
@@ -295,14 +299,19 @@ class ChatApp(tk.Tk):
     def on_room_select(self, _):
         sel = self.rooms_list.curselection()
         if not sel: return
-        room = self.rooms_list.get(sel[0]).split(" ")[0]
-        self.open_chat("room", room)
+        idx = sel[0]
+        if idx < 0 or idx >= len(self.room_index): return
+        room_id = self.room_index[idx]
+        self.open_chat("room", room_id)
 
     def open_chat(self, kind, name):
         self.current_chat = (kind, name)
-        # tiêu đề hiển thị họ tên nếu có
-        display = self.friends.get(name, {}).get("full_name") if (kind == "dm") else name
-        self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {display or name}")
+        if kind == "dm":
+            display = self.friends.get(name, {}).get("full_name") or name
+        else:
+            room_name = self.rooms.get(name) or name
+            display = f"{room_name} ({name})"
+        self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {display}")
         cid = self.chat_id(kind, name)
         self.unread[cid] = 0
         self.refresh_lists()
@@ -313,7 +322,7 @@ class ChatApp(tk.Tk):
 
     def ui_add_friend(self):
         top = tk.Toplevel(self); top.title("Thêm bạn")
-        tk.Label(top, text="Nhập **ID đăng nhập** của bạn muốn kết bạn:").pack(padx=8, pady=8)
+        tk.Label(top, text="Nhập ID đăng nhập:").pack(padx=8, pady=8)
         v = tk.StringVar()
         e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
         def ok():
@@ -353,23 +362,32 @@ class ChatApp(tk.Tk):
         e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
         def ok():
             name = v.get().strip()
-            if name: self.net.send("create_room", {"room": name})
+            if name:
+                self.net.send("create_room", {"room_name": name})
             top.destroy()
         ttk.Button(top, text="Tạo", command=ok).pack(padx=8, pady=8)
 
     def ui_join_room(self):
-        top = tk.Toplevel(self); top.title("Tham gia phòng")
+        top = tk.Toplevel(self); top.title("Tham gia phòng bằng ID")
         v = tk.StringVar()
-        ttk.Label(top, text="Tên phòng:").pack(padx=8, pady=8)
-        e = ttk.Entry(top, textvariable=v, width=28); e.pack(padx=8, pady=4); e.focus_set()
+        ttk.Label(top, text="ID phòng (4 số):").pack(padx=8, pady=8)
+        e = ttk.Entry(top, textvariable=v, width=12); e.pack(padx=8, pady=4); e.focus_set()
         def ok():
-            name = v.get().strip()
-            if name: self.net.send("join_room", {"room": name})
+            rid = v.get().strip()
+            if rid:
+                self.net.send("join_room", {"room_id": rid})
             top.destroy()
         ttk.Button(top, text="Tham gia", command=ok).pack(padx=8, pady=8)
 
+    def ui_leave_room(self):
+        if not self.current_chat or self.current_chat[0] != "room":
+            messagebox.showinfo("Rời phòng", "Hãy chọn một phòng trong danh sách trước.")
+            return
+        room_id = self.current_chat[1]
+        if messagebox.askyesno("Rời phòng", f"Bạn muốn rời phòng '{self.rooms.get(room_id, room_id)}' (ID {room_id})?"):
+            self.net.send("leave_room", {"room_id": room_id})
+
     def ui_search_users(self):
-        # tìm theo ID
         q = self.search_user_var.get().strip()
         self.net.send("search_users", {"query": q})
 
@@ -416,16 +434,8 @@ class ChatApp(tk.Tk):
             who = m.get("from"); ts = (m.get("ts","")[:19]).replace("T"," ")
             left = (who != self.username)
             b = ttk.Frame(self.msg_frame); b.pack(anchor="w" if left else "e", fill="x", pady=2, padx=8)
-            # Hàng tiêu đề: nếu PM thì hiển thị theo họ tên người gửi (nếu có)
-            show_name = who
-            if self.current_chat and self.current_chat[0] == "dm":
-                # dm với 1 người: chỉ hiện tên người gửi nếu là đối phương
-                if left:
-                    show_name = self.friends.get(who, {}).get("full_name") or who
-            else:
-                # room: thử map họ tên nếu là bạn bè
-                show_name = self.friends.get(who, {}).get("full_name") or who
-
+            # Hàng tiêu đề: hiển thị họ tên nếu có
+            show_name = self.friends.get(who, {}).get("full_name") or who
             ttk.Label(b, text=f"{show_name} • {ts}", foreground="#555").pack(anchor="w" if left else "e")
             mt = m.get("msgtype")
             if mt == "text":
@@ -459,11 +469,10 @@ class ChatApp(tk.Tk):
         messagebox.showinfo("Lưu file", f"Đã lưu: {path}")
 
     def refresh_lists(self):
-        # Cập nhật list bạn bè hiển thị HỌ TÊN (nếu có)
+        # Bạn bè (hiển thị Họ Tên)
         if self.friends_list and self.friends_list.winfo_exists():
             self.friends_list.delete(0, "end")
             self.friend_index = []
-            # sắp xếp theo tên hiển thị
             def display_name(uid):
                 return (self.friends.get(uid, {}).get("full_name") or uid).lower()
             for uid in sorted(self.friends.keys(), key=display_name):
@@ -475,12 +484,16 @@ class ChatApp(tk.Tk):
                 self.friends_list.insert("end", f"{name} {dot}{badge}")
                 self.friend_index.append(uid)
 
+        # Phòng (hiển thị tên phòng)
         if self.rooms_list and self.rooms_list.winfo_exists():
             self.rooms_list.delete(0, "end")
-            for r in sorted(self.rooms):
-                cid = self.chat_id("room", r)
+            self.room_index = []
+            for rid, rname in sorted(self.rooms.items(), key=lambda kv: kv[1].lower()):
+                cid = self.chat_id("room", rid)
                 badge = f"  ({self.unread.get(cid,0)})" if self.unread.get(cid,0) else ""
-                self.rooms_list.insert("end", f"{r}{badge}")
+                self.rooms_list.insert("end", f"{rname}{badge}")
+                self.room_index.append(rid)
+
         if hasattr(self, "req_badge_var") and self.req_badge_var:
             self.req_badge_var.set(str(len(self.incoming)))
 
@@ -519,9 +532,6 @@ class ChatApp(tk.Tk):
         self.ensure_main_ui()
 
         if t == "friend_list":
-            # chấp nhận cả 2 dạng:
-            # 1) [{"username": "...", "full_name": "...", "online": true}, ...]
-            # 2) [{"username": "...", "online": true}, ...]  hoặc ["id1","id2",...]
             self.friends = {}
             raw = obj.get("friends", [])
             for item in raw:
@@ -558,11 +568,56 @@ class ChatApp(tk.Tk):
             return
 
         if t == "room_list":
-            self.rooms = obj.get("rooms", [])
+            # rooms: list of {"id","name"}
+            self.rooms = {}
+            for r in obj.get("rooms", []):
+                if isinstance(r, dict) and r.get("id"):
+                    self.rooms[str(r["id"])] = r.get("name") or str(r["id"])
+                elif isinstance(r, str):
+                    # fallback hiếm gặp: nếu server gửi chuỗi
+                    self.rooms[str(r)] = str(r)
             self.refresh_lists()
             return
 
+        if t == "create_room":
+            if obj.get("ok"):
+                room = obj.get("room", {})
+                rid = str(room.get("id"))
+                rname = room.get("name")
+                messagebox.showinfo("Tạo phòng", f"Đã tạo phòng '{rname}' với ID {rid}.")
+                self.net.send("list_rooms", {})
+            else:
+                messagebox.showerror("Tạo phòng", obj.get("error","Tạo phòng thất bại"))
+            return
+
+        if t == "join_room":
+            if obj.get("ok"):
+                room = obj.get("room", {})
+                rid = str(room.get("id"))
+                rname = room.get("name")
+                messagebox.showinfo("Tham gia phòng", f"Đã tham gia '{rname}' (ID {rid}).")
+                self.net.send("list_rooms", {})
+            else:
+                messagebox.showerror("Tham gia phòng", obj.get("error","Không tham gia được"))
+            return
+
+        if t == "leave_room":
+            if obj.get("ok"):
+                messagebox.showinfo("Rời phòng", "Đã rời phòng.")
+                # nếu đang mở phòng đó thì rời view
+                if self.current_chat and self.current_chat[0] == "room":
+                    rid = self.current_chat[1]
+                    if rid not in self.rooms:
+                        self.current_chat = None
+                        self.chat_title.configure(text="(Chưa chọn hội thoại)")
+                        self.clear_messages()
+                self.net.send("list_rooms", {})
+            else:
+                messagebox.showerror("Rời phòng", obj.get("error","Không rời được phòng"))
+            return
+
         if t == "room_update":
+            # thay đổi thành viên/join/leave/delete -> refresh danh sách
             self.net.send("list_rooms", {})
             return
 
@@ -589,7 +644,7 @@ class ChatApp(tk.Tk):
                 partner = sender if sender != self.username else to
                 cid = self.chat_id("dm", partner)
             else:
-                cid = self.chat_id("room", to)
+                cid = self.chat_id("room", str(to))
             lst = self.history.setdefault(cid, [])
             lst.append(m)
             if not self.current_chat or self.chat_id(*self.current_chat) != cid:
@@ -607,9 +662,6 @@ class ChatApp(tk.Tk):
             return
 
         if t == "search_users":
-            # Server có thể trả:
-            # - list[str] các ID
-            # - list[dict]: {"username": "...", "full_name": "..."}
             res = obj.get("results", [])
             top = tk.Toplevel(self); top.title("Kết quả tìm kiếm (theo ID)")
             lb = tk.Listbox(top, width=40, height=12); lb.pack(padx=8, pady=8)
