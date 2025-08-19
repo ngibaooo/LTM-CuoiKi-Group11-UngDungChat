@@ -1,4 +1,5 @@
-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import socket
 import threading
 import json
@@ -79,6 +80,18 @@ class ChatApp(tk.Tk):
         self.geometry("1000x640")
         self.minsize(900, 560)
 
+        # --- ttk style: sáng, bo góc nhẹ ---
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure("TButton", padding=(10, 6), font=("Segoe UI", 10))
+        style.configure("Accent.TButton", padding=(12, 7), font=("Segoe UI", 10, "bold"))
+        style.configure("TEntry", padding=4)
+        style.configure("Card.TFrame", background="#ffffff", borderwidth=1, relief="solid")
+        style.map("TButton", relief=[("pressed", "sunken"), ("active", "raised")])
+
         self.net = NetClient(HOST, PORT, self.enqueue_event)
         self.event_q = queue.Queue()
 
@@ -102,18 +115,28 @@ class ChatApp(tk.Tk):
         self.room_index = []
         self.search_index = []
 
-        # ====== THEME kiểu Messenger ======
-        self.chat_bg         = "#121314"
-        self.time_fg         = "#9aa0a6"
-        self.other_bubble_bg = "#3a3b3c"
-        self.self_bubble_bg  = "#2d5bff"
-        self.other_text_fg   = "#ffffff"
-        self.self_text_fg    = "#ffffff"
-        self.bubble_radius   = 16
-        self.bubble_pad_xy   = (14, 10)
-        self.bubble_wrap_w   = 520
-        self.row_pad_x       = 10
-        self.row_pad_y       = 6
+        # ====== THEME SÁNG ======
+        # nền tổng thể
+        self.app_bg         = "#f5f7fb"   # nền cửa sổ
+        self.sidebar_bg     = "#ffffff"   # nền panel trái
+        self.chat_bg        = "#f9fafc"   # nền vùng chat (canvas)
+        # màu chữ
+        self.text_primary   = "#1f2937"
+        self.text_muted     = "#6b7280"
+        # bong bóng
+        self.self_bubble_bg   = "#3b82f6"   # xanh dương
+        self.self_text_fg     = "#ffffff"
+        self.other_bubble_bg  = "#e5e7eb"   # xám nhạt
+        self.other_text_fg    = "#111827"
+        # viền/độ cong
+        self.bubble_radius  = 16
+        self.bubble_pad_xy  = (14, 10)
+        self.bubble_wrap_w  = 520
+        self.row_pad_x      = 10
+        self.row_pad_y      = 6
+        self.time_fg        = "#9aa0a6"
+
+        self.configure(bg=self.app_bg)
 
         # containers
         self.login_frame = None
@@ -140,156 +163,231 @@ class ChatApp(tk.Tk):
         except Exception:
             return ts
 
-    # ---- login ui ----
+    # ---- login ui (giữ giống trước) ----
     def build_login_ui(self):
         self.destroy_main_container()
         self.login_frame = ttk.Frame(self)
-        self.login_frame.pack(fill="both", expand=True, padx=16, pady=16)
-        ttk.Label(self.login_frame, text="ỨNG DỤNG CHAT SOCKET", font=("Segoe UI", 18, "bold")).pack(pady=10)
+        self.login_frame.pack(fill="both", expand=True)
 
-        nb = ttk.Notebook(self.login_frame)
-        self.tab_login = ttk.Frame(nb); self.tab_register = ttk.Frame(nb)
-        nb.add(self.tab_login, text="Đăng nhập"); nb.add(self.tab_register, text="Đăng ký"); nb.pack(fill="x", pady=10)
+        container = ttk.Frame(self.login_frame)
+        container.place(relx=0.5, rely=0.22, anchor="n")
+        for i in range(2):
+            container.columnconfigure(i, weight=1)
 
-        # login
-        self.l_user = tk.StringVar(); self.l_pass = tk.StringVar()
-        ttk.Label(self.tab_login, text="ID đăng nhập").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ent_u = ttk.Entry(self.tab_login, textvariable=self.l_user, width=30); ent_u.grid(row=0, column=1, padx=6, pady=6)
-        ttk.Label(self.tab_login, text="Mật khẩu").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-        ent_p = ttk.Entry(self.tab_login, textvariable=self.l_pass, show="•", width=30); ent_p.grid(row=1, column=1, padx=6, pady=6)
-        ttk.Button(self.tab_login, text="Đăng nhập", command=self.do_login).grid(row=2, column=0, columnspan=2, pady=10)
-        ent_u.bind("<Return>", lambda e: self.do_login()); ent_p.bind("<Return>", lambda e: self.do_login())
+        ttk.Label(container, text="Đăng nhập / Đăng ký", font=("Segoe UI", 20, "bold")).grid(
+            row=0, column=0, columnspan=2, pady=(0, 16)
+        )
 
-        # register
-        self.r_name = tk.StringVar(); self.r_user = tk.StringVar(); self.r_pass = tk.StringVar()
-        ttk.Label(self.tab_register, text="Họ tên").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_register, textvariable=self.r_name, width=30).grid(row=0, column=1, padx=6, pady=6)
-        ttk.Label(self.tab_register, text="ID đăng nhập").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_register, textvariable=self.r_user, width=30).grid(row=1, column=1, padx=6, pady=6)
-        ttk.Label(self.tab_register, text="Mật khẩu").grid(row=2, column=0, sticky="w", padx=6, pady=6)
-        ttk.Entry(self.tab_register, textvariable=self.r_pass, show="•", width=30).grid(row=2, column=1, padx=6, pady=6)
-        ttk.Button(self.tab_register, text="Tạo tài khoản", command=self.do_register).grid(row=3, column=0, columnspan=2, pady=10)
+        # Biến dữ liệu dùng chung
+        self.u_var = tk.StringVar()
+        self.p_var = tk.StringVar()
+        self.e_var = tk.StringVar()  # Email khi đăng ký
 
-        self.status_lbl = ttk.Label(self.login_frame, text="", foreground="#666"); self.status_lbl.pack()
+        ttk.Label(container, text="Username").grid(row=1, column=0, sticky="e", padx=8, pady=6)
+        ent_user = ttk.Entry(container, textvariable=self.u_var, width=36)
+        ent_user.grid(row=1, column=1, sticky="w", padx=8, pady=6)
+
+        ttk.Label(container, text="Password").grid(row=2, column=0, sticky="e", padx=8, pady=6)
+        ent_pass = ttk.Entry(container, textvariable=self.p_var, show="•", width=36)
+        ent_pass.grid(row=2, column=1, sticky="w", padx=8, pady=6)
+
+        ttk.Label(container, text="Email (khi đăng ký)").grid(row=3, column=0, sticky="e", padx=8, pady=6)
+        ent_email = ttk.Entry(container, textvariable=self.e_var, width=36)
+        ent_email.grid(row=3, column=1, sticky="w", padx=8, pady=6)
+
+        btn_row = ttk.Frame(container)
+        btn_row.grid(row=4, column=0, columnspan=2, pady=12)
+
+        ttk.Button(btn_row, text="Kết nối", command=self.do_connect).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Đăng nhập", style="Accent.TButton", command=self.do_login).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="Đăng ký", command=self.do_register).pack(side="left", padx=4)
+
+        self.status_lbl = ttk.Label(container, text="Chưa kết nối", foreground=self.text_muted)
+        self.status_lbl.grid(row=5, column=0, columnspan=2, pady=(6, 0))
+
+        # Enter để đăng nhập nhanh
+        ent_user.bind("<Return>", lambda e: self.do_login())
+        ent_pass.bind("<Return>", lambda e: self.do_login())
 
     def set_status(self, text):
         if self.login_frame and self.login_frame.winfo_exists():
             self.status_lbl.configure(text=text)
 
+    # nút "Kết nối"
+    def do_connect(self):
+        try:
+            if not self.net.connected:
+                self.net.connect()
+            self.set_status("Đã kết nối server.")
+        except Exception as e:
+            self.set_status(f"Lỗi kết nối: {e}")
+
     def do_register(self):
-        name = self.r_name.get().strip()
-        u = self.r_user.get().strip()
-        p = self.r_pass.get()
-        if not name or not u or not p:
-            self.set_status("Nhập đủ Họ tên, ID và Mật khẩu.")
+        u = self.u_var.get().strip()
+        p = self.p_var.get()
+        email = self.e_var.get().strip()
+        if not u or not p or not email:
+            self.set_status("Nhập đủ Username, Password và Email.")
             return
         try:
             self.net.connect()
-            self.net.send("register", {"username": u, "password": p, "full_name": name})
+            payload = {"username": u, "password": p, "full_name": email}
+            # nếu server có field email riêng:
+            # payload["email"] = email
+            self.net.send("register", payload)
+            self.set_status("Đang gửi yêu cầu đăng ký...")
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
 
     def do_login(self):
-        u = self.l_user.get().strip(); p = self.l_pass.get()
-        if not u or not p: self.set_status("Nhập ID & mật khẩu."); return
+        u = self.u_var.get().strip()
+        p = self.p_var.get()
+        if not u or not p:
+            self.set_status("Nhập Username & Password.")
+            return
         try:
-            self.net.connect(); self.net.send("login", {"username": u, "password": p})
+            self.net.connect()
+            self.net.send("login", {"username": u, "password": p})
+            self.set_status("Đang đăng nhập...")
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không kết nối được server: {e}")
 
-    # ---- main ui ----
+    # ---- main ui (SÁNG – không nền đen) ----
     def build_main_ui(self):
         if self.main_ui_built: return
         self.main_ui_built = True
         if self.login_frame and self.login_frame.winfo_exists():
             self.login_frame.destroy()
 
-        self.columnconfigure(0, weight=0); self.columnconfigure(1, weight=1); self.rowconfigure(0, weight=1)
+        self.configure(bg=self.app_bg)
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        self.main_container = ttk.Frame(self)
+        self.main_container = ttk.Frame(self, padding=8)
         self.main_container.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
-        # left
-        left = ttk.Frame(self.main_container, padding=6); left.grid(row=0, column=0, sticky="nsw"); left.columnconfigure(0, weight=1)
-
-        header = ttk.Frame(left); header.grid(row=0, column=0, sticky="ew")
-        ttk.Label(header, text=f"Xin chào, {self.username}", font=("Segoe UI", 12, "bold")).pack(side="left")
+        # ===== Header top bar =====
+        topbar = ttk.Frame(self.main_container)
+        topbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        topbar.columnconfigure(0, weight=1)
+        title = ttk.Label(topbar, text=f"Xin chào, {self.username}", font=("Segoe UI", 14, "bold"), foreground=self.text_primary)
+        title.grid(row=0, column=0, sticky="w")
         self.req_badge_var = tk.StringVar(value="0")
-        ttk.Button(header, textvariable=self.req_badge_var, width=4, command=self.ui_show_requests).pack(side="right", padx=4)
+        ttk.Button(topbar, text="Yêu cầu: ", state="disabled").grid(row=0, column=1, sticky="e")
+        ttk.Button(topbar, textvariable=self.req_badge_var, width=4, command=self.ui_show_requests).grid(row=0, column=2, sticky="e", padx=(4,0))
 
-        fr_controls = ttk.Frame(left); fr_controls.grid(row=1, column=0, sticky="ew", pady=4)
-        ttk.Button(fr_controls, text="Thêm bạn", command=self.ui_add_friend).pack(side="left", padx=2)
-        ttk.Button(fr_controls, text="Yêu cầu", command=self.ui_show_requests).pack(side="left", padx=2)
-        ttk.Button(fr_controls, text="Đăng xuất", command=self.ui_logout).pack(side="right", padx=2)
+        # ===== Left sidebar (card) =====
+        left_card = ttk.Frame(self.main_container, style="Card.TFrame")
+        left_card.grid(row=1, column=0, sticky="nsw", padx=(0,8))
+        left = ttk.Frame(left_card, padding=10)
+        left.pack(fill="both", expand=True)
 
-        room_controls = ttk.Frame(left); room_controls.grid(row=2, column=0, sticky="ew", pady=4)
-        ttk.Button(room_controls, text="Tạo phòng", command=self.ui_create_room).pack(side="left", padx=2)
-        ttk.Button(room_controls, text="Tham gia phòng (ID)", command=self.ui_join_room).pack(side="left", padx=2)
-        ttk.Button(room_controls, text="Rời phòng", command=self.ui_leave_room).pack(side="left", padx=2)
+        # Actions
+        act = ttk.Frame(left)
+        act.pack(fill="x", pady=(0,6))
+        ttk.Button(act, text="➕ Thêm bạn", command=self.ui_add_friend).pack(side="left", padx=2)
+        ttk.Button(act, text="📨 Yêu cầu", command=self.ui_show_requests).pack(side="left", padx=2)
+        ttk.Button(act, text="⎋ Đăng xuất", command=self.ui_logout).pack(side="right", padx=2)
 
-        # search users by login ID
-        search_controls = ttk.Frame(left); search_controls.grid(row=3, column=0, sticky="ew", pady=4)
+        # Rooms actions
+        ract = ttk.Frame(left)
+        ract.pack(fill="x", pady=6)
+        ttk.Button(ract, text="🏠 Tạo phòng", command=self.ui_create_room).pack(side="left", padx=2)
+        ttk.Button(ract, text="🔑 Tham gia (ID)", command=self.ui_join_room).pack(side="left", padx=2)
+        ttk.Button(ract, text="🚪 Rời phòng", command=self.ui_leave_room).pack(side="left", padx=2)
+
+        # Search user
+        srow = ttk.Frame(left)
+        srow.pack(fill="x", pady=(6,4))
+        ttk.Label(srow, text="Tìm theo ID:").pack(side="left")
         self.search_user_var = tk.StringVar()
-        ent = ttk.Entry(search_controls, textvariable=self.search_user_var, width=18); ent.pack(side="left", padx=2)
+        ent = ttk.Entry(srow, textvariable=self.search_user_var, width=18)
+        ent.pack(side="left", padx=6)
         ent.bind("<Return>", lambda e: self.ui_search_users())
-        ttk.Button(search_controls, text="Tìm theo ID", command=self.ui_search_users).pack(side="left", padx=2)
+        ttk.Button(srow, text="Tìm", command=self.ui_search_users).pack(side="left")
 
-        self.nb_left = ttk.Notebook(left); self.tab_friends = ttk.Frame(self.nb_left); self.tab_rooms = ttk.Frame(self.nb_left)
+        # Lists
+        self.nb_left = ttk.Notebook(left)
+        self.tab_friends = ttk.Frame(self.nb_left); self.tab_rooms = ttk.Frame(self.nb_left)
         self.nb_left.add(self.tab_friends, text="Bạn bè"); self.nb_left.add(self.tab_rooms, text="Phòng")
-        self.nb_left.grid(row=4, column=0, sticky="nsew", pady=(4,0)); left.rowconfigure(4, weight=1)
+        self.nb_left.pack(fill="both", expand=True, pady=(6,0))
 
-        self.friends_list = tk.Listbox(self.tab_friends, width=28, height=20); self.friends_list.pack(fill="both", expand=True)
+        self.friends_list = tk.Listbox(self.tab_friends, width=28, height=20, bd=0, highlightthickness=0)
+        self.friends_list.pack(fill="both", expand=True, padx=4, pady=4)
         self.friends_list.bind("<<ListboxSelect>>", self.on_friend_select)
 
-        self.rooms_list = tk.Listbox(self.tab_rooms, width=28, height=20); self.rooms_list.pack(fill="both", expand=True)
+        self.rooms_list = tk.Listbox(self.tab_rooms, width=28, height=20, bd=0, highlightthickness=0)
+        self.rooms_list.pack(fill="both", expand=True, padx=4, pady=4)
         self.rooms_list.bind("<<ListboxSelect>>", self.on_room_select)
 
-        # right (chat thread tối + bong bóng)
-        right = tk.Frame(self.main_container, bg=self.chat_bg)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1); right.rowconfigure(1, weight=1)
+        # ===== Right chat area (card) =====
+        right_card = ttk.Frame(self.main_container, style="Card.TFrame")
+        right_card.grid(row=1, column=1, sticky="nsew")
+        self.main_container.columnconfigure(1, weight=1)
+        self.main_container.rowconfigure(1, weight=1)
 
+        right = tk.Frame(right_card, bg=self.chat_bg, highlightthickness=0, bd=0)
+        right.pack(fill="both", expand=True)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        # Header chat
         hdr = tk.Frame(right, bg=self.chat_bg)
         hdr.grid(row=0, column=0, sticky="ew")
-
-        # --- chấm online ngay cạnh tiêu đề ---
         self.status_dot = tk.Canvas(hdr, width=12, height=12, bg=self.chat_bg, highlightthickness=0, bd=0)
-        self.status_dot.pack(side="left", padx=(10,2), pady=12)
-        self.status_dot_id = self.status_dot.create_oval(2,2,10,10, fill="#6b6f74", outline="")
-
-        self.chat_title = tk.Label(hdr, text="(Chưa chọn hội thoại)", font=("Segoe UI", 12, "bold"), fg="#e9eaeb", bg=self.chat_bg)
-        self.chat_title.pack(side="left", padx=8, pady=10)
-        self.typing_lbl = tk.Label(hdr, text="", fg="#a8adb2", bg=self.chat_bg)
+        self.status_dot.pack(side="left", padx=(12,4), pady=14)
+        self.status_dot_id = self.status_dot.create_oval(2,2,10,10, fill="#a3a3a3", outline="")
+        self.chat_title = tk.Label(hdr, text="(Chưa chọn hội thoại)", font=("Segoe UI", 12, "bold"),
+                                   fg=self.text_primary, bg=self.chat_bg)
+        self.chat_title.pack(side="left", padx=6, pady=10)
+        self.typing_lbl = tk.Label(hdr, text="", fg=self.text_muted, bg=self.chat_bg)
         self.typing_lbl.pack(side="right", padx=10, pady=10)
 
-        # vùng luồng chat
+        # Vùng tin nhắn
         self.msg_canvas = tk.Canvas(right, bg=self.chat_bg, highlightthickness=0, bd=0)
         self.msg_scroll = ttk.Scrollbar(right, orient="vertical", command=self.msg_canvas.yview)
         self.msg_holder = tk.Frame(self.msg_canvas, bg=self.chat_bg)
+        self.msg_window = self.msg_canvas.create_window((0,0), window=self.msg_holder, anchor="nw")
         self.msg_holder.bind("<Configure>", lambda e: self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all")))
-        self.msg_canvas.create_window((0,0), window=self.msg_holder, anchor="nw")
+        self.msg_canvas.bind("<Configure>", self._sync_msg_width)
+        self._bind_mouse_wheel(self.msg_canvas)
+
         self.msg_canvas.configure(yscrollcommand=self.msg_scroll.set)
         self.msg_canvas.grid(row=1, column=0, sticky="nsew"); self.msg_scroll.grid(row=1, column=1, sticky="ns")
 
-        # composer
+        # Composer
         comp = tk.Frame(right, bg=self.chat_bg)
-        comp.grid(row=2, column=0, sticky="ew")
+        comp.grid(row=2, column=0, sticky="ew", pady=(6,10), padx=10)
         self.input_var = tk.StringVar()
         self.entry = ttk.Entry(comp, textvariable=self.input_var)
-        self.entry.pack(side="left", fill="x", expand=True, padx=(10,6), pady=10)
+        self.entry.pack(side="left", fill="x", expand=True, padx=(0,8))
         self.entry.bind("<KeyPress>", self.on_typing_keypress)
-        ttk.Button(comp, text="Ảnh", command=self.ui_send_image).pack(side="left", padx=2, pady=10)
-        ttk.Button(comp, text="File", command=self.ui_send_file).pack(side="left", padx=2, pady=10)
-        ttk.Button(comp, text="Gửi", command=self.ui_send_text).pack(side="left", padx=(2,10), pady=10)
+        ttk.Button(comp, text="Ảnh", command=self.ui_send_image).pack(side="left", padx=2)
+        ttk.Button(comp, text="File", command=self.ui_send_file).pack(side="left", padx=2)
+        ttk.Button(comp, text="Gửi", style="Accent.TButton", command=self.ui_send_text).pack(side="left", padx=(6,0))
 
         # yêu cầu danh sách ban đầu
         self.net.send("list_friends", {})
         self.net.send("list_rooms", {})
 
-        # grid config
-        self.main_container.columnconfigure(0, weight=0)
-        self.main_container.columnconfigure(1, weight=1)
-        self.main_container.rowconfigure(0, weight=1)
+    # keep the inner frame width equal to canvas width
+    def _sync_msg_width(self, event):
+        try:
+            self.msg_canvas.itemconfigure(self.msg_window, width=event.width)
+        except Exception:
+            pass
+
+    # enable mouse wheel scrolling
+    def _bind_mouse_wheel(self, widget):
+        def _on_mousewheel(e):
+            if e.num == 5 or e.delta < 0:
+                widget.yview_scroll(1, "units")
+            else:
+                widget.yview_scroll(-1, "units")
+        widget.bind("<MouseWheel>", _on_mousewheel)      # Windows / macOS
+        widget.bind("<Button-4>", _on_mousewheel)        # Linux up
+        widget.bind("<Button-5>", _on_mousewheel)        # Linux down
 
     # ---- destroy / reset ----
     def destroy_main_container(self):
@@ -341,9 +439,9 @@ class ChatApp(tk.Tk):
         self.open_chat("room", room_id)
 
     def _update_header_online(self):
-        """Hiển thị chấm online (xanh) khi đang chat DM và đối phương online."""
-        color_off = "#6b6f74"
-        color_on = "#00d964"  # xanh lá
+        """Chấm online (xanh) khi đang chat DM và đối phương online."""
+        color_off = "#a3a3a3"
+        color_on = "#10b981"
         col = color_off
         if self.current_chat and self.current_chat[0] == "dm":
             uid = self.current_chat[1]
@@ -466,7 +564,7 @@ class ChatApp(tk.Tk):
         if not text: return
         k, name = self.current_chat
         self.net.send("send_message", {"target_type": k, "to": name, "msgtype": "text", "content": text})
-        self._append_local_message(k, name, "text", content=text)
+        self._append_local_message(k, name, "text", content=text)   # hiện ngay
         self.input_var.set("")
 
     def ui_send_image(self):
@@ -494,7 +592,7 @@ class ChatApp(tk.Tk):
         k, name = self.current_chat
         self.net.send("typing", {"target_type": k, "to": name, "is_typing": True})
 
-    # ====== VẼ BONG BÓNG ======
+    # ====== BONG BÓNG ======
     def _draw_round_rect(self, canvas, x1, y1, x2, y2, r, fill):
         points = [
             x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
@@ -505,7 +603,7 @@ class ChatApp(tk.Tk):
     def _add_time_divider(self, parent, text):
         row = tk.Frame(parent, bg=self.chat_bg)
         row.pack(fill="x", pady=(4,2))
-        lbl = tk.Label(row, text=text, bg=self.chat_bg, fg=self.time_fg, font=("Segoe UI", 9))
+        lbl = tk.Label(row, text=text, bg=self.chat_bg, fg=self.text_muted, font=("Segoe UI", 9))
         lbl.pack(pady=2)
         return row
 
@@ -523,20 +621,23 @@ class ChatApp(tk.Tk):
         c.pack(side=side)
 
         pad_x, pad_y = self.bubble_pad_xy
-        text_id = c.create_text(pad_x, pad_y,
-                                text=text,
-                                fill=(self.self_text_fg if is_self else self.other_text_fg),
-                                font=("Segoe UI", 11),
-                                width=self.bubble_wrap_w,
-                                anchor="nw", justify="left")
+        text_id = c.create_text(
+            pad_x, pad_y, text=text,
+            fill=(self.self_text_fg if is_self else self.other_text_fg),
+            font=("Segoe UI", 11),
+            width=self.bubble_wrap_w, anchor="nw", justify="left"
+        )
         c.update_idletasks()
         bbox = c.bbox(text_id)
-        w = min(self.bubble_wrap_w, bbox[2] + pad_x) + pad_x
-        h = bbox[3] + pad_y
+        text_w = max(0, bbox[2] - bbox[0])
+        w = min(self.bubble_wrap_w, text_w + pad_x*2)
+        h = (bbox[3] - bbox[1]) + pad_y*2
 
-        c.configure(width=w, height=h + pad_y)
-        self._draw_round_rect(c, 0, 0, w, h + pad_y, self.bubble_radius,
-                              fill=(self.self_bubble_bg if is_self else self.other_bubble_bg))
+        c.configure(width=w, height=h)
+        self._draw_round_rect(
+            c, 0, 0, w, h, self.bubble_radius,
+            fill=(self.self_bubble_bg if is_self else self.other_bubble_bg)
+        )
         c.tag_raise(text_id)
 
     def _add_file_bubble(self, parent, filename, data_b64, is_self):
@@ -544,9 +645,11 @@ class ChatApp(tk.Tk):
         self._add_text_bubble(parent, txt, is_self)
         row = tk.Frame(parent, bg=self.chat_bg)
         row.pack(fill="x", padx=self.row_pad_x, pady=(0, self.row_pad_y))
-        anchor = "e" if is_self else "w"
         btn = ttk.Button(row, text="Tải xuống", command=lambda d=data_b64, fn=filename: self.save_bytes(d, fn))
-        btn.pack(anchor=anchor, padx=6)
+        if is_self:
+            btn.pack(anchor="e", padx=6)
+        else:
+            btn.pack(anchor="w", padx=6)
 
     def _add_image_bubble(self, parent, filename, data_b64, is_self):
         try:
@@ -574,8 +677,7 @@ class ChatApp(tk.Tk):
         hold = tk.Frame(row, bg=self.chat_bg)
         hold.pack(anchor=anchor, fill="x")
 
-        c = tk.Canvas(hold, bg=self.chat_bg, highlightthickness=0, bd=0,
-                      width=w + 28, height=h + 28)
+        c = tk.Canvas(hold, bg=self.chat_bg, highlightthickness=0, bd=0, width=w + 28, height=h + 28)
         c.pack(side=side)
 
         self._draw_round_rect(c, 0, 0, w + 28, h + 28, self.bubble_radius,
@@ -585,7 +687,10 @@ class ChatApp(tk.Tk):
         row2 = tk.Frame(parent, bg=self.chat_bg)
         row2.pack(fill="x", padx=self.row_pad_x, pady=(0, self.row_pad_y))
         btn = ttk.Button(row2, text="Tải ảnh", command=lambda d=data_b64, fn=filename: self.save_bytes(d, fn))
-        btn.pack(anchor=("e" if is_self else "w"), padx=6)
+        if is_self:
+            btn.pack(anchor="e", padx=6)
+        else:
+            btn.pack(anchor="w", padx=6)
 
     # ---- render & lists ----
     def clear_messages(self):
@@ -642,7 +747,7 @@ class ChatApp(tk.Tk):
                 self.friends_list.insert("end", f"{name} {dot}{badge}")
                 self.friend_index.append(uid)
 
-        # Phòng (hiển thị tên phòng)
+        # Phòng
         if self.rooms_list and self.rooms_list.winfo_exists():
             self.rooms_list.delete(0, "end")
             self.room_index = []
@@ -655,7 +760,6 @@ class ChatApp(tk.Tk):
         if hasattr(self, "req_badge_var") and self.req_badge_var:
             self.req_badge_var.set(str(len(self.incoming)))
 
-        # cập nhật chấm online ở header nếu đang PM
         self._update_header_online()
 
     def ensure_main_ui(self):
