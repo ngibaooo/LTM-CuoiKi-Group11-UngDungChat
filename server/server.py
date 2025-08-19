@@ -300,8 +300,8 @@ def show_friends(request, client_socket):
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT u.id, u.username FROM users u
-        JOIN user_relationships ur ON u.id = ur.user2_id
+        SELECT u.user_id, u.username FROM users u
+        JOIN user_relationships ur ON u.user_id = ur.user2_id
         WHERE ur.user1_id = %s AND ur.status = 'accepted'
     """, (user_id,))
     
