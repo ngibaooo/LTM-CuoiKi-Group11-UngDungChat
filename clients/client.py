@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import base64
 import os
+import datetime
 
 HOST = "127.0.0.1"
 PORT = 5555
@@ -83,24 +84,37 @@ class ChatApp(tk.Tk):
         self.event_q = queue.Queue()
 
         # state
-        self.username = None                  # ID đăng nhập của chính mình
+        self.username = None
         self.main_ui_built = False
         # friends: dict[id] = {"online": bool, "full_name": str or None}
         self.friends = {}
-        self.incoming = []                    # danh sách id đang mời mình
-        self.outgoing = []                    # danh sách id mình đã mời
+        self.incoming = []
+        self.outgoing = []
 
         # rooms: dict[room_id] = room_name
         self.rooms = {}
         self.current_chat = None              # ("dm", id) hoặc ("room", room_id)
-        self.history = {}                     # key = "dm:id" | "room:room_id" -> list messages
+        self.history = {}                     # key = "dm:id" | "room:room_id"
         self.unread = {}
         self.images_cache = []
 
         # mapping hiển thị
-        self.friend_index = []                # listbox index -> friend id
-        self.room_index = []                  # listbox index -> room_id
-        self.search_index = []                # listbox index -> search result id
+        self.friend_index = []
+        self.room_index = []
+        self.search_index = []
+
+        # ====== THEME kiểu Messenger ======
+        self.chat_bg         = "#121314"
+        self.time_fg         = "#9aa0a6"
+        self.other_bubble_bg = "#3a3b3c"
+        self.self_bubble_bg  = "#2d5bff"
+        self.other_text_fg   = "#ffffff"
+        self.self_text_fg    = "#ffffff"
+        self.bubble_radius   = 16
+        self.bubble_pad_xy   = (14, 10)
+        self.bubble_wrap_w   = 520
+        self.row_pad_x       = 10
+        self.row_pad_y       = 6
 
         # containers
         self.login_frame = None
@@ -117,6 +131,15 @@ class ChatApp(tk.Tk):
         while not self.event_q.empty():
             self.handle_event(self.event_q.get())
         self.after(80, self.process_events)
+
+    def _now_iso_local(self):
+        return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    def _hhmm_from_iso(self, ts):
+        try:
+            return ts[11:16]
+        except Exception:
+            return ts
 
     # ---- login ui ----
     def build_login_ui(self):
@@ -222,29 +245,43 @@ class ChatApp(tk.Tk):
         self.rooms_list = tk.Listbox(self.tab_rooms, width=28, height=20); self.rooms_list.pack(fill="both", expand=True)
         self.rooms_list.bind("<<ListboxSelect>>", self.on_room_select)
 
-        # right
-        right = ttk.Frame(self.main_container, padding=6); right.grid(row=0, column=1, sticky="nsew")
+        # right (chat thread tối + bong bóng)
+        right = tk.Frame(self.main_container, bg=self.chat_bg)
+        right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1); right.rowconfigure(1, weight=1)
 
-        hdr = ttk.Frame(right); hdr.grid(row=0, column=0, sticky="ew")
-        self.chat_title = ttk.Label(hdr, text="(Chưa chọn hội thoại)", font=("Segoe UI", 12, "bold")); self.chat_title.pack(side="left")
-        self.typing_lbl = ttk.Label(hdr, text="", foreground="#777"); self.typing_lbl.pack(side="right")
+        hdr = tk.Frame(right, bg=self.chat_bg)
+        hdr.grid(row=0, column=0, sticky="ew")
 
-        self.msg_canvas = tk.Canvas(right, bg="#fbfbfb", highlightthickness=1, highlightbackground="#ddd")
+        # --- chấm online ngay cạnh tiêu đề ---
+        self.status_dot = tk.Canvas(hdr, width=12, height=12, bg=self.chat_bg, highlightthickness=0, bd=0)
+        self.status_dot.pack(side="left", padx=(10,2), pady=12)
+        self.status_dot_id = self.status_dot.create_oval(2,2,10,10, fill="#6b6f74", outline="")
+
+        self.chat_title = tk.Label(hdr, text="(Chưa chọn hội thoại)", font=("Segoe UI", 12, "bold"), fg="#e9eaeb", bg=self.chat_bg)
+        self.chat_title.pack(side="left", padx=8, pady=10)
+        self.typing_lbl = tk.Label(hdr, text="", fg="#a8adb2", bg=self.chat_bg)
+        self.typing_lbl.pack(side="right", padx=10, pady=10)
+
+        # vùng luồng chat
+        self.msg_canvas = tk.Canvas(right, bg=self.chat_bg, highlightthickness=0, bd=0)
         self.msg_scroll = ttk.Scrollbar(right, orient="vertical", command=self.msg_canvas.yview)
-        self.msg_frame = ttk.Frame(self.msg_canvas)
-        self.msg_frame.bind("<Configure>", lambda e: self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all")))
-        self.msg_canvas.create_window((0,0), window=self.msg_frame, anchor="nw")
+        self.msg_holder = tk.Frame(self.msg_canvas, bg=self.chat_bg)
+        self.msg_holder.bind("<Configure>", lambda e: self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all")))
+        self.msg_canvas.create_window((0,0), window=self.msg_holder, anchor="nw")
         self.msg_canvas.configure(yscrollcommand=self.msg_scroll.set)
-        self.msg_canvas.grid(row=1, column=0, sticky="nsew", pady=(4,4)); self.msg_scroll.grid(row=1, column=1, sticky="ns")
+        self.msg_canvas.grid(row=1, column=0, sticky="nsew"); self.msg_scroll.grid(row=1, column=1, sticky="ns")
 
-        comp = ttk.Frame(right); comp.grid(row=2, column=0, sticky="ew")
+        # composer
+        comp = tk.Frame(right, bg=self.chat_bg)
+        comp.grid(row=2, column=0, sticky="ew")
         self.input_var = tk.StringVar()
-        self.entry = ttk.Entry(comp, textvariable=self.input_var); self.entry.pack(side="left", fill="x", expand=True, padx=2, pady=4)
+        self.entry = ttk.Entry(comp, textvariable=self.input_var)
+        self.entry.pack(side="left", fill="x", expand=True, padx=(10,6), pady=10)
         self.entry.bind("<KeyPress>", self.on_typing_keypress)
-        ttk.Button(comp, text="Ảnh", command=self.ui_send_image).pack(side="left", padx=2)
-        ttk.Button(comp, text="File", command=self.ui_send_file).pack(side="left", padx=2)
-        ttk.Button(comp, text="Gửi", command=self.ui_send_text).pack(side="left", padx=2)
+        ttk.Button(comp, text="Ảnh", command=self.ui_send_image).pack(side="left", padx=2, pady=10)
+        ttk.Button(comp, text="File", command=self.ui_send_file).pack(side="left", padx=2, pady=10)
+        ttk.Button(comp, text="Gửi", command=self.ui_send_text).pack(side="left", padx=(2,10), pady=10)
 
         # yêu cầu danh sách ban đầu
         self.net.send("list_friends", {})
@@ -304,6 +341,17 @@ class ChatApp(tk.Tk):
         room_id = self.room_index[idx]
         self.open_chat("room", room_id)
 
+    def _update_header_online(self):
+        """Hiển thị chấm online (xanh) khi đang chat DM và đối phương online."""
+        color_off = "#6b6f74"
+        color_on = "#00d964"  # xanh lá
+        col = color_off
+        if self.current_chat and self.current_chat[0] == "dm":
+            uid = self.current_chat[1]
+            if self.friends.get(uid, {}).get("online"):
+                col = color_on
+        self.status_dot.itemconfig(self.status_dot_id, fill=col, outline=col)
+
     def open_chat(self, kind, name):
         self.current_chat = (kind, name)
         if kind == "dm":
@@ -312,6 +360,8 @@ class ChatApp(tk.Tk):
             room_name = self.rooms.get(name) or name
             display = f"{room_name} ({name})"
         self.chat_title.configure(text=f"{'PM' if kind=='dm' else 'Phòng'}: {display}")
+        self._update_header_online()
+
         cid = self.chat_id(kind, name)
         self.unread[cid] = 0
         self.refresh_lists()
@@ -391,12 +441,33 @@ class ChatApp(tk.Tk):
         q = self.search_user_var.get().strip()
         self.net.send("search_users", {"query": q})
 
+    # ---------- gửi tin nhắn (optimistic UI cho DM) ----------
+    def _append_local_message(self, target_type, to, msgtype, content=None, filename=None, data_b64=None):
+        if target_type != "dm":
+            return
+        ts = self._now_iso_local()
+        msg = {
+            "from": self.username,
+            "to": to,
+            "target_type": "dm",
+            "msgtype": msgtype,
+            "content": content or "",
+            "filename": filename,
+            "data_base64": data_b64,
+            "ts": ts
+        }
+        cid = self.chat_id("dm", to)
+        self.history.setdefault(cid, []).append(msg)
+        if self.current_chat and self.chat_id(*self.current_chat) == cid:
+            self.render_messages(cid)
+
     def ui_send_text(self):
         if not self.current_chat: return
         text = self.input_var.get().strip()
         if not text: return
         k, name = self.current_chat
         self.net.send("send_message", {"target_type": k, "to": name, "msgtype": "text", "content": text})
+        self._append_local_message(k, name, "text", content=text)
         self.input_var.set("")
 
     def ui_send_image(self):
@@ -407,6 +478,7 @@ class ChatApp(tk.Tk):
         b64 = base64.b64encode(b).decode("ascii")
         k, name = self.current_chat
         self.net.send("send_message", {"target_type": k, "to": name, "msgtype": "image", "filename": os.path.basename(path), "data_base64": b64})
+        self._append_local_message(k, name, "image", filename=os.path.basename(path), data_b64=b64)
 
     def ui_send_file(self):
         if not self.current_chat: return
@@ -416,50 +488,137 @@ class ChatApp(tk.Tk):
         b64 = base64.b64encode(b).decode("ascii")
         k, name = self.current_chat
         self.net.send("send_message", {"target_type": k, "to": name, "msgtype": "file", "filename": os.path.basename(path), "data_base64": b64})
+        self._append_local_message(k, name, "file", filename=os.path.basename(path), data_b64=b64)
 
     def on_typing_keypress(self, _):
         if not self.current_chat: return
         k, name = self.current_chat
         self.net.send("typing", {"target_type": k, "to": name, "is_typing": True})
 
+    # ====== VẼ BONG BÓNG ======
+    def _draw_round_rect(self, canvas, x1, y1, x2, y2, r, fill):
+        points = [
+            x1+r, y1, x2-r, y1, x2, y1, x2, y1+r, x2, y2-r, x2, y2,
+            x2-r, y2, x1+r, y2, x1, y2, x1, y2-r, x1, y1+r, x1, y1
+        ]
+        return canvas.create_polygon(points, smooth=True, fill=fill, outline=fill)
+
+    def _add_time_divider(self, parent, text):
+        row = tk.Frame(parent, bg=self.chat_bg)
+        row.pack(fill="x", pady=(4,2))
+        lbl = tk.Label(row, text=text, bg=self.chat_bg, fg=self.time_fg, font=("Segoe UI", 9))
+        lbl.pack(pady=2)
+        return row
+
+    def _add_text_bubble(self, parent, text, is_self):
+        row = tk.Frame(parent, bg=self.chat_bg)
+        row.pack(fill="x", padx=self.row_pad_x, pady=self.row_pad_y)
+
+        anchor = "e" if is_self else "w"
+        side   = "right" if is_self else "left"
+
+        hold = tk.Frame(row, bg=self.chat_bg)
+        hold.pack(anchor=anchor, fill="x")
+
+        c = tk.Canvas(hold, bg=self.chat_bg, highlightthickness=0, bd=0)
+        c.pack(side=side)
+
+        pad_x, pad_y = self.bubble_pad_xy
+        text_id = c.create_text(pad_x, pad_y,
+                                text=text,
+                                fill=(self.self_text_fg if is_self else self.other_text_fg),
+                                font=("Segoe UI", 11),
+                                width=self.bubble_wrap_w,
+                                anchor="nw", justify="left")
+        c.update_idletasks()
+        bbox = c.bbox(text_id)
+        w = min(self.bubble_wrap_w, bbox[2] + pad_x) + pad_x
+        h = bbox[3] + pad_y
+
+        c.configure(width=w, height=h + pad_y)
+        self._draw_round_rect(c, 0, 0, w, h + pad_y, self.bubble_radius,
+                              fill=(self.self_bubble_bg if is_self else self.other_bubble_bg))
+        c.tag_raise(text_id)
+
+    def _add_file_bubble(self, parent, filename, data_b64, is_self):
+        txt = f"📎 {filename}"
+        self._add_text_bubble(parent, txt, is_self)
+        row = tk.Frame(parent, bg=self.chat_bg)
+        row.pack(fill="x", padx=self.row_pad_x, pady=(0, self.row_pad_y))
+        anchor = "e" if is_self else "w"
+        btn = ttk.Button(row, text="Tải xuống", command=lambda d=data_b64, fn=filename: self.save_bytes(d, fn))
+        btn.pack(anchor=anchor, padx=6)
+
+    def _add_image_bubble(self, parent, filename, data_b64, is_self):
+        try:
+            im = tk.PhotoImage(data=base64.b64decode(data_b64))
+        except Exception:
+            tmp = os.path.join(os.getcwd(), f"_tmp_{filename}")
+            with open(tmp, "wb") as f: f.write(base64.b64decode(data_b64))
+            im = tk.PhotoImage(file=tmp)
+        self.images_cache.append(im)
+
+        maxw = self.bubble_wrap_w
+        w, h = im.width(), im.height()
+        if w > maxw and w > 0:
+            ratio = max(1, int((w + maxw - 1)//maxw))
+            im = im.subsample(ratio, ratio)
+            self.images_cache.append(im)
+            w, h = im.width(), im.height()
+
+        row = tk.Frame(parent, bg=self.chat_bg)
+        row.pack(fill="x", padx=self.row_pad_x, pady=self.row_pad_y)
+
+        anchor = "e" if is_self else "w"
+        side   = "right" if is_self else "left"
+
+        hold = tk.Frame(row, bg=self.chat_bg)
+        hold.pack(anchor=anchor, fill="x")
+
+        c = tk.Canvas(hold, bg=self.chat_bg, highlightthickness=0, bd=0,
+                      width=w + 28, height=h + 28)
+        c.pack(side=side)
+
+        self._draw_round_rect(c, 0, 0, w + 28, h + 28, self.bubble_radius,
+                              fill=(self.self_bubble_bg if is_self else self.other_bubble_bg))
+        c.create_image(14, 14, anchor="nw", image=im)
+
+        row2 = tk.Frame(parent, bg=self.chat_bg)
+        row2.pack(fill="x", padx=self.row_pad_x, pady=(0, self.row_pad_y))
+        btn = ttk.Button(row2, text="Tải ảnh", command=lambda d=data_b64, fn=filename: self.save_bytes(d, fn))
+        btn.pack(anchor=("e" if is_self else "w"), padx=6)
+
     # ---- render & lists ----
     def clear_messages(self):
-        for w in self.msg_frame.winfo_children():
+        for w in self.msg_holder.winfo_children():
             w.destroy()
         self.images_cache.clear()
 
     def render_messages(self, cid):
         self.clear_messages()
-        for m in self.history.get(cid, []):
-            who = m.get("from"); ts = (m.get("ts","")[:19]).replace("T"," ")
-            left = (who != self.username)
-            b = ttk.Frame(self.msg_frame); b.pack(anchor="w" if left else "e", fill="x", pady=2, padx=8)
-            # Hàng tiêu đề: hiển thị họ tên nếu có
-            show_name = self.friends.get(who, {}).get("full_name") or who
-            ttk.Label(b, text=f"{show_name} • {ts}", foreground="#555").pack(anchor="w" if left else "e")
+        msgs = self.history.get(cid, [])
+
+        last_sender = None
+        for m in msgs:
+            who = m.get("from")
+            is_self = (who == self.username)
+            ts = m.get("ts","")
+            hhmm = self._hhmm_from_iso(ts)
+
+            if last_sender is None or who != last_sender:
+                self._add_time_divider(self.msg_holder, hhmm)
+            last_sender = who
+
             mt = m.get("msgtype")
             if mt == "text":
-                t = tk.Text(b, height=2, wrap="word", relief="flat", bg="#f6f6f6")
-                t.insert("1.0", m.get("content","")); t.configure(state="disabled"); t.pack(fill="x")
+                self._add_text_bubble(self.msg_holder, m.get("content",""), is_self)
             elif mt == "image":
-                fname = m.get("filename",""); data = m.get("data_base64")
-                ttk.Label(b, text=f"[Ảnh] {fname}").pack(anchor="w")
-                ext = os.path.splitext(fname.lower())[1]
-                if ext in [".png", ".gif"]:
-                    try:
-                        img = tk.PhotoImage(data=base64.b64decode(data))
-                    except Exception:
-                        tmp = os.path.join(os.getcwd(), f"_tmp_{fname}")
-                        with open(tmp, "wb") as f: f.write(base64.b64decode(data))
-                        img = tk.PhotoImage(file=tmp)
-                    self.images_cache.append(img)
-                    tk.Label(b, image=img, bd=1, relief="solid").pack(anchor="w", pady=2)
-                ttk.Button(b, text="Lưu ảnh", command=lambda d=data, fn=fname: self.save_bytes(d, fn)).pack(anchor="w")
+                self._add_image_bubble(self.msg_holder, m.get("filename",""), m.get("data_base64"), is_self)
             elif mt == "file":
-                fname = m.get("filename","(file)")
-                ttk.Label(b, text=f"[File] {fname}").pack(anchor="w")
-                ttk.Button(b, text="Lưu file", command=lambda d=m.get("data_base64"), fn=fname: self.save_bytes(d, fn)).pack(anchor="w")
-        self.msg_canvas.update_idletasks(); self.msg_canvas.yview_moveto(1.0)
+                self._add_file_bubble(self.msg_holder, m.get("filename","(file)"), m.get("data_base64"), is_self)
+
+        self.msg_canvas.update_idletasks()
+        self.msg_canvas.yview_moveto(1.0)
 
     def save_bytes(self, data_b64, filename):
         if not data_b64: return
@@ -469,7 +628,7 @@ class ChatApp(tk.Tk):
         messagebox.showinfo("Lưu file", f"Đã lưu: {path}")
 
     def refresh_lists(self):
-        # Bạn bè (hiển thị Họ Tên)
+        # Bạn bè (hiển thị Họ Tên + chấm 🟢/⚫)
         if self.friends_list and self.friends_list.winfo_exists():
             self.friends_list.delete(0, "end")
             self.friend_index = []
@@ -496,6 +655,9 @@ class ChatApp(tk.Tk):
 
         if hasattr(self, "req_badge_var") and self.req_badge_var:
             self.req_badge_var.set(str(len(self.incoming)))
+
+        # cập nhật chấm online ở header nếu đang PM
+        self._update_header_online()
 
     def ensure_main_ui(self):
         if not self.main_ui_built and self.username:
@@ -528,7 +690,6 @@ class ChatApp(tk.Tk):
             self.reset_to_login()
             return
 
-        # đảm bảo UI tồn tại khi có sự kiện realtime
         self.ensure_main_ui()
 
         if t == "friend_list":
@@ -568,13 +729,11 @@ class ChatApp(tk.Tk):
             return
 
         if t == "room_list":
-            # rooms: list of {"id","name"}
             self.rooms = {}
             for r in obj.get("rooms", []):
                 if isinstance(r, dict) and r.get("id"):
                     self.rooms[str(r["id"])] = r.get("name") or str(r["id"])
                 elif isinstance(r, str):
-                    # fallback hiếm gặp: nếu server gửi chuỗi
                     self.rooms[str(r)] = str(r)
             self.refresh_lists()
             return
@@ -604,7 +763,6 @@ class ChatApp(tk.Tk):
         if t == "leave_room":
             if obj.get("ok"):
                 messagebox.showinfo("Rời phòng", "Đã rời phòng.")
-                # nếu đang mở phòng đó thì rời view
                 if self.current_chat and self.current_chat[0] == "room":
                     rid = self.current_chat[1]
                     if rid not in self.rooms:
@@ -617,7 +775,6 @@ class ChatApp(tk.Tk):
             return
 
         if t == "room_update":
-            # thay đổi thành viên/join/leave/delete -> refresh danh sách
             self.net.send("list_rooms", {})
             return
 
