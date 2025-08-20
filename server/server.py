@@ -215,11 +215,11 @@ def receive_messages(request, client_socket):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT id, sender_id, receiver_id, content, send_at, room_id
+            SELECT id, sender_id, receiver_id, content, sent_at, room_id
             FROM messages
             WHERE receiver_id = %s
                OR room_id IN (SELECT room_id FROM room_members WHERE user_id = %s)
-            ORDER BY send_at DESC
+            ORDER BY sent_at DESC
             LIMIT 200
             """,
             (user_id, user_id),
@@ -228,15 +228,15 @@ def receive_messages(request, client_socket):
 
         message_list = []
         for r in rows:
-            _id, sender_id, receiver_id, content, send_at, room_id = r
+            _id, sender_id, receiver_id, content, sent_at, room_id = r
             # JSON hóa thời gian an toàn
-            ts = send_at.isoformat(sep=" ") if hasattr(send_at, "isoformat") else str(send_at)
+            ts = sent_at.isoformat(sep=" ") if hasattr(sent_at, "isoformat") else str(sent_at)
             message_list.append({
                 "id": _id,
                 "sender_id": sender_id,
                 "receiver_id": receiver_id,
                 "content": content,
-                "send_at": ts,
+                "sent_at": ts,
                 "room_id": room_id
             })
         _send_json(client_socket, message_list)
