@@ -36,8 +36,8 @@ def _send_json(client_socket, obj: dict):
         pass
 
 # ------------------ Broadcast / Private ------------------
-def broadcast_message(room_id: int, message: str, sender_id: int):
-    """Gửi message tới tất cả thành viên phòng (trừ người gửi)."""
+def broadcast_message(room_id: int, message: dict, sender_id: int):
+    """Gửi message (JSON) tới tất cả thành viên phòng (trừ người gửi)."""
     conn = get_connection()
     if not conn:
         print("broadcast_message: DB connect failed")
@@ -52,7 +52,8 @@ def broadcast_message(room_id: int, message: str, sender_id: int):
                 continue
             sock = user_sockets.get(uid)
             if sock:
-                _send_json(sock, {"action": "receive_message", "message": message})
+                # Gửi đầy đủ thông tin message kèm action
+                _send_json(sock, {"action": "receive_message", **message})
     except Exception as e:
         print("broadcast_message error:", e)
     finally:
@@ -66,28 +67,57 @@ def send_private_message(request, client_socket):
 
     conn = get_connection()
     if not conn:
-        _send_json(client_socket, {"action": "send_private_result", "ok": False, "error": "db_connect_failed"})
+        _send_json(client_socket, {
+            "action": "send_private_result",
+            "ok": False,
+            "error": "db_connect_failed"
+        })
         return
 
     cur = None
     try:
         cur = conn.cursor()
-        # Lưu message (room_id = NULL, có receiver_id)
+        # Lưu message (room_id = NULL, có receiver_id, có sent_at)
         cur.execute(
-            "INSERT INTO messages (sender_id, receiver_id, content, room_id) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO messages (sender_id, receiver_id, content, room_id, sent_at) "
+            "VALUES (%s, %s, %s, %s, NOW())",
             (sender_id, receiver_id, content, None),
         )
         conn.commit()
 
+        # Lấy sent_at vừa insert
+        cur.execute("SELECT sent_at FROM messages WHERE id = LAST_INSERT_ID()")
+        (sent_at,) = cur.fetchone()
+        ts = sent_at.isoformat(sep=" ") if hasattr(sent_at, "isoformat") else str(sent_at)
+
+        # Payload chung cho cả sender & receiver
+        msg_obj = {
+            "sender_id": sender_id,
+            "receiver_id": receiver_id,
+            "content": content,
+            "sent_at": ts,
+            "room_id": None
+        }
+
         # Push realtime cho người nhận nếu đang online
         recv_sock = user_sockets.get(receiver_id)
         if recv_sock:
-            _send_json(recv_sock, {"action": "receive_message", "message": f"[DM từ {sender_id}]: {content}"})
+            _send_json(recv_sock, {"action": "receive_message", **msg_obj})
 
-        _send_json(client_socket, {"action": "send_private_result", "ok": True})
+        # Phản hồi cho người gửi
+        _send_json(client_socket, {
+            "action": "send_private_result",
+            "ok": True,
+            **msg_obj
+        })
+
     except Exception as e:
         print("send_private_message error:", e)
-        _send_json(client_socket, {"action": "send_private_result", "ok": False, "error": "exception"})
+        _send_json(client_socket, {
+            "action": "send_private_result",
+            "ok": False,
+            "error": "exception"
+        })
     finally:
         _safe_close(cur, conn)
 
@@ -175,29 +205,58 @@ def logout_user(user_id: int):
         _safe_close(cur, conn)
 
 def send_message(request, client_socket):
-    """Gửi tin nhắn vào phòng + broadcast."""
+    """Gửi tin nhắn vào phòng + broadcast kèm thời gian."""
     sender_id = request.get("sender_id")
     content = request.get("content", "")
     room_id = request.get("room_id")
 
     conn = get_connection()
     if not conn:
-        _send_json(client_socket, {"action": "send_message_result", "ok": False, "error": "db_connect_failed"})
+        _send_json(client_socket, {
+            "action": "send_message_result",
+            "ok": False,
+            "error": "db_connect_failed"
+        })
         return
 
     cur = None
     try:
         cur = conn.cursor()
+        # Thêm tin nhắn với thời gian gửi
         cur.execute(
-            "INSERT INTO messages (sender_id, content, room_id, receiver_id) VALUES (%s, %s, %s, %s)",
+            "INSERT INTO messages (sender_id, content, room_id, receiver_id, sent_at) "
+            "VALUES (%s, %s, %s, %s, NOW())",
             (sender_id, content, room_id, None),
         )
         conn.commit()
-        broadcast_message(room_id, f"[Room {room_id} | {sender_id}]: {content}", sender_id)
-        _send_json(client_socket, {"action": "send_message_result", "ok": True})
+
+        # Lấy sent_at vừa insert
+        cur.execute("SELECT sent_at FROM messages WHERE id = LAST_INSERT_ID()")
+        (sent_at,) = cur.fetchone()
+        ts = sent_at.isoformat(sep=" ") if hasattr(sent_at, "isoformat") else str(sent_at)
+
+        # Tạo payload để broadcast
+        message_obj = {
+            "sender_id": sender_id,
+            "content": content,
+            "sent_at": ts,
+            "room_id": room_id
+        }
+
+        broadcast_message(room_id, message_obj, sender_id)
+
+        _send_json(client_socket, {
+            "action": "send_message_result",
+            "ok": True,
+            "sent_at": ts
+        })
     except Exception as e:
         print("send_message error:", e)
-        _send_json(client_socket, {"action": "send_message_result", "ok": False, "error": "exception"})
+        _send_json(client_socket, {
+            "action": "send_message_result",
+            "ok": False,
+            "error": "exception"
+        })
     finally:
         _safe_close(cur, conn)
 
