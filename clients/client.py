@@ -39,36 +39,62 @@ class ChatClient:
         self.login_frame = ttk.Frame(self.root, padding=16)
         self.login_frame.pack(fill=tk.BOTH, expand=True)
 
-        title = ttk.Label(self.login_frame, text="Đăng nhập / Đăng ký", font=("Segoe UI", 18, "bold"))
+        title = ttk.Label(self.login_frame, text="Chào mừng 👋", font=("Segoe UI", 18, "bold"))
         title.pack(pady=(0, 12))
 
-        form = ttk.Frame(self.login_frame)
-        form.pack()
+        # Tabs: Đăng nhập / Đăng ký
+        self.auth_nb = ttk.Notebook(self.login_frame)
+        self.auth_nb.pack(fill=tk.X, expand=False)
 
-        ttk.Label(form, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
-        self.ent_username = ttk.Entry(form, width=32)
-        self.ent_username.grid(row=0, column=1, padx=6, pady=6)
+        # ---------- Tab Đăng nhập ----------
+        tab_login = ttk.Frame(self.auth_nb, padding=10)
+        self.auth_nb.add(tab_login, text="Đăng nhập")
 
-        ttk.Label(form, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
-        self.ent_password = ttk.Entry(form, show="*", width=32)
-        self.ent_password.grid(row=1, column=1, padx=6, pady=6)
+        frm_l = ttk.Frame(tab_login)
+        frm_l.pack()
 
-        ttk.Label(form, text="Email (khi đăng ký)").grid(row=2, column=0, sticky="w", padx=6, pady=6)
-        self.ent_email = ttk.Entry(form, width=32)
-        self.ent_email.grid(row=2, column=1, padx=6, pady=6)
+        ttk.Label(frm_l, text="Username").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        self.lg_username = ttk.Entry(frm_l, width=32)
+        self.lg_username.grid(row=0, column=1, padx=6, pady=6)
 
-        buttons = ttk.Frame(self.login_frame)
-        buttons.pack(pady=8)
+        ttk.Label(frm_l, text="Password").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        self.lg_password = ttk.Entry(frm_l, show="*", width=32)
+        self.lg_password.grid(row=1, column=1, padx=6, pady=6)
 
-        self.btn_connect = ttk.Button(buttons, text="Kết nối", command=self.connect_server)
-        self.btn_connect.grid(row=0, column=0, padx=6)
+        btns_l = ttk.Frame(tab_login)
+        btns_l.pack(pady=8)
+        ttk.Button(btns_l, text="Kết nối", command=self.connect_server).grid(row=0, column=0, padx=6)
+        ttk.Button(btns_l, text="Đăng nhập", command=self.login).grid(row=0, column=1, padx=6)
 
-        self.btn_login = ttk.Button(buttons, text="Đăng nhập", command=self.login)
-        self.btn_login.grid(row=0, column=1, padx=6)
+        # ---------- Tab Đăng ký ----------
+        tab_register = ttk.Frame(self.auth_nb, padding=10)
+        self.auth_nb.add(tab_register, text="Đăng ký")
 
-        self.btn_register = ttk.Button(buttons, text="Đăng ký", command=self.register)
-        self.btn_register.grid(row=0, column=2, padx=6)
+        frm_r = ttk.Frame(tab_register)
+        frm_r.pack()
 
+        ttk.Label(frm_r, text="Họ tên").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        self.reg_fullname = ttk.Entry(frm_r, width=32)
+        self.reg_fullname.grid(row=0, column=1, padx=6, pady=6)
+
+        ttk.Label(frm_r, text="Username (đăng nhập)").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        self.reg_username = ttk.Entry(frm_r, width=32)
+        self.reg_username.grid(row=1, column=1, padx=6, pady=6)
+
+        ttk.Label(frm_r, text="Mật khẩu").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        self.reg_password = ttk.Entry(frm_r, show="*", width=32)
+        self.reg_password.grid(row=2, column=1, padx=6, pady=6)
+
+        ttk.Label(frm_r, text="Email (bắt buộc)").grid(row=3, column=0, sticky="w", padx=6, pady=6)
+        self.reg_email = ttk.Entry(frm_r, width=32)
+        self.reg_email.grid(row=3, column=1, padx=6, pady=6)
+
+        btns_r = ttk.Frame(tab_register)
+        btns_r.pack(pady=8)
+        ttk.Button(btns_r, text="Kết nối", command=self.connect_server).grid(row=0, column=0, padx=6)
+        ttk.Button(btns_r, text="Đăng ký", command=self.register).grid(row=0, column=1, padx=6)
+
+        # Status line
         self.lbl_status = ttk.Label(self.login_frame, text="Chưa kết nối")
         self.lbl_status.pack(pady=(8, 0))
 
@@ -253,20 +279,26 @@ class ChatClient:
             self.connect_server()
             if not self.sock:
                 return
-        username = self.ent_username.get().strip()
-        password = self.ent_password.get().strip()
-        email = self.ent_email.get().strip()
-        if not username or not password or not email:
-            messagebox.showwarning("Thiếu dữ liệu", "Nhập đủ username, password, email")
+        full_name = self.reg_fullname.get().strip()
+        username  = self.reg_username.get().strip()
+        password  = self.reg_password.get().strip()
+        email     = self.reg_email.get().strip()
+
+        if not full_name:
+            messagebox.showwarning("Thiếu dữ liệu", "Nhập họ tên")
             return
+        if not username or not password or not email:
+            messagebox.showwarning("Thiếu dữ liệu", "Nhập đủ username, mật khẩu và email")
+            return
+
         ok = self._send({
             "action": "register",
+            "full_name": full_name,         # server hiện có thể chưa lưu — gửi kèm để sẵn sàng
             "username": username,
             "password": password,
             "email": email
         })
         if ok:
-            # read one immediate response synchronously (before starting receiver)
             try:
                 resp = self.sock.recv(4096).decode()
                 messagebox.showinfo("Phản hồi", resp)
@@ -278,8 +310,8 @@ class ChatClient:
             self.connect_server()
             if not self.sock:
                 return
-        username = self.ent_username.get().strip()
-        password = self.ent_password.get().strip()
+        username = self.lg_username.get().strip()
+        password = self.lg_password.get().strip()
         if not username or not password:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập đủ username và password")
             return
@@ -390,10 +422,10 @@ class ChatClient:
                 self.ent_message.delete(0, tk.END)
             return
 
-        # Private chat — requires a small server-side addition (see ghi chú bên dưới)
+        # Private chat — requires server-side handler (đã có trong server mình gửi)
         if self.current_dm_user_id:
             ok = self._send({
-                "action": "send_private_message",  # ⚠️ cần bổ sung handler ở server
+                "action": "send_private_message",
                 "sender_id": self.user_id,
                 "receiver_id": self.current_dm_user_id,
                 "content": content
@@ -485,7 +517,6 @@ class ChatClient:
             while True:
                 kind, payload = self.incoming.get_nowait()
                 if kind == "status":
-                    # show status in messages tab footer
                     messagebox.showinfo("Server", payload)
                 elif kind == "chat":
                     self._append_chat(f"[Phòng/Hệ thống]: {payload}")
@@ -501,7 +532,6 @@ class ChatClient:
                     self.txt_messages.configure(state=tk.NORMAL)
                     self.txt_messages.delete(1.0, tk.END)
                     for m in payload:
-                        # server message tuple mapping assumed: [id, sender_id, receiver_id, content, send_at, room_id]
                         try:
                             sender_id = m[1]
                             receiver_id = m[2]
@@ -527,6 +557,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# test
