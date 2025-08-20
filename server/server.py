@@ -404,10 +404,13 @@ def show_friends(request, client_socket):
             SELECT u.user_id, u.username
             FROM users u
             JOIN user_relationships ur
-              ON (u.user_id = ur.user2_id AND ur.user1_id = %s)
+              ON (
+                (u.user_id = ur.user2_id AND ur.user1_id = %s)
+              OR (u.user_id = ur.user1_id AND ur.user2_id = %s)
+              )
             WHERE ur.status = 'accepted'
             """,
-            (user_id,),
+            (user_id, user_id),
         )
         rows = cur.fetchall()
         friends = [{"id": r[0], "username": r[1]} for r in rows]
