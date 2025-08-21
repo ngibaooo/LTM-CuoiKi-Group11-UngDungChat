@@ -3,7 +3,8 @@ import threading
 import json
 import queue
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from contextlib import suppress
+from tkinter import ttk, messagebox
 
 HOST = "127.0.0.1"   # đổi thành IP của server nếu chạy khác máy
 PORT = 5000
@@ -18,6 +19,7 @@ class ChatClient:
         self.sock = None
         self.receiver_thread = None
         self.running = False
+        self._shutting_down = False  # cờ để không báo lỗi khi chủ động đăng xuất
 
         # State
         self.user_id = None
@@ -25,17 +27,39 @@ class ChatClient:
         self.current_room_id = None  # room đang chat nhóm
         self.current_dm_user_id = None  # user đang chat riêng
 
+        # UI holders (để hủy/đổi nhanh giữa Login/Main)
+        self.login_frame = None
+        self.main_frame = None
+
         # A queue for messages from receiver thread
         self.incoming = queue.Queue()
 
         # Build UI
         self._build_login_ui()
 
-        # Periodically process incoming messages
+        # Periodically process incoming messages (chạy trên UI thread)
         self.root.after(100, self._process_incoming)
 
     # ========================= UI BUILDERS =========================
+    def _clear_root_children(self):
+        """Hủy toàn bộ widget con trên root (dùng khi chuyển màn)."""
+        for w in self.root.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
     def _build_login_ui(self):
+        # Xóa main UI nếu đang hiển thị
+        if self.main_frame is not None:
+            try:
+                self.main_frame.destroy()
+            except Exception:
+                pass
+            self.main_frame = None
+
+        self._clear_root_children()
+
         self.login_frame = ttk.Frame(self.root, padding=16)
         self.login_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -63,7 +87,6 @@ class ChatClient:
 
         btns_l = ttk.Frame(tab_login)
         btns_l.pack(pady=8)
-        ttk.Button(btns_l, text="Kết nối", command=self.connect_server).grid(row=0, column=0, padx=6)
         ttk.Button(btns_l, text="Đăng nhập", command=self.login).grid(row=0, column=1, padx=6)
 
         # ---------- Tab Đăng ký ----------
@@ -99,13 +122,20 @@ class ChatClient:
         self.lbl_status.pack(pady=(8, 0))
 
     def _build_main_ui(self):
-        # Destroy login
-        for w in self.login_frame.winfo_children():
-            w.destroy()
-        self.login_frame.destroy()
+        # Hủy login UI
+        if self.login_frame is not None:
+            try:
+                self.login_frame.destroy()
+            except Exception:
+                pass
+            self.login_frame = None
+
+        # Tạo khung chính để dễ hủy khi đăng xuất
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Navbar
-        top = ttk.Frame(self.root)
+        top = ttk.Frame(self.main_frame)
         top.pack(fill=tk.X)
         self.lbl_user = ttk.Label(top, text=f"Đang đăng nhập: {self.username} (id={self.user_id})")
         self.lbl_user.pack(side=tk.LEFT, padx=10, pady=6)
@@ -113,7 +143,7 @@ class ChatClient:
         ttk.Button(top, text="Đăng xuất", command=self.logout).pack(side=tk.RIGHT, padx=10)
 
         # Notebook
-        self.nb = ttk.Notebook(self.root)
+        self.nb = ttk.Notebook(self.main_frame)
         self.nb.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         # --- Tab: Chat ---
@@ -213,25 +243,31 @@ class ChatClient:
     # ========================= NETWORK =========================
     def connect_server(self):
         if self.sock:
+            try:
+                self.lbl_status.config(text=f"Đã kết nối tới {HOST}:{PORT}")
+            except Exception:
+                pass
             messagebox.showinfo("Thông báo", "Đã kết nối rồi")
             return
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
-            self.lbl_status.config(text=f"Đã kết nối tới {HOST}:{PORT}")
+            if hasattr(self, "lbl_status"):
+                self.lbl_status.config(text=f"Đã kết nối tới {HOST}:{PORT}")
         except Exception as e:
             self.sock = None
             messagebox.showerror("Lỗi", f"Không thể kết nối server: {e}")
 
     def _send(self, payload: dict):
         if not self.sock:
-            messagebox.showwarning("Chưa kết nối", "Hãy Kết nối tới server trước")
+            messagebox.showwarning("Chưa kết nối", "Hãy kết nối tới server trước")
             return False
         try:
             self.sock.send(json.dumps(payload).encode())
             return True
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Mất kết nối server: {e}")
+            if not self._shutting_down:
+                messagebox.showerror("Lỗi", f"Mất kết nối server: {e}")
             return False
 
     def _start_receiver(self):
@@ -242,35 +278,47 @@ class ChatClient:
         self.receiver_thread.start()
 
     def _receiver_loop(self):
+        # Nhận dữ liệu từ socket, đẩy vào queue cho UI xử lý
         while self.running:
             try:
                 data = self.sock.recv(4096)
                 if not data:
-                    self.incoming.put(("status", "Mất kết nối từ server"))
+                    # Server đóng kết nối
+                    if not self._shutting_down:
+                        self.incoming.put(("status", "Mất kết nối từ server"))
                     break
+
                 text = data.decode(errors="ignore")
 
-                # Try parse JSON
                 try:
                     obj = json.loads(text)
-                    # Detect different payload shapes
-                    if isinstance(obj, dict) and obj.get("action") == "receive_message":
-                        self.incoming.put(("chat", obj.get("message")))
-                    elif isinstance(obj, dict) and "chat_rooms" in obj:
-                        self.incoming.put(("rooms", obj["chat_rooms"]))
-                    elif isinstance(obj, dict) and "friends" in obj:
-                        self.incoming.put(("friends", obj["friends"]))
-                    elif isinstance(obj, list):
+
+                    if isinstance(obj, list):
                         self.incoming.put(("history", obj))
+
+                    elif isinstance(obj, dict):
+                        action = obj.get("action")
+                        if action == "receive_message":
+                            self.incoming.put(("chat", obj))
+                        elif action in ("send_message_result", "send_private_result"):
+                            self.incoming.put(("send_result", obj))
+                        elif "chat_rooms" in obj:
+                            self.incoming.put(("rooms", obj["chat_rooms"]))
+                        elif "friends" in obj:
+                            self.incoming.put(("friends", obj["friends"]))
+                        else:
+                            self.incoming.put(("status", text))
                     else:
-                        # Fallback show raw
                         self.incoming.put(("status", text))
+
                 except json.JSONDecodeError:
-                    # plain string response
                     self.incoming.put(("status", text))
+
             except Exception as e:
-                self.incoming.put(("status", f"Lỗi nhận dữ liệu: {e}"))
+                if not self._shutting_down:
+                    self.incoming.put(("status", f"Lỗi nhận dữ liệu: {e}"))
                 break
+
         self.running = False
 
     # ========================= AUTH =========================
@@ -293,7 +341,7 @@ class ChatClient:
 
         ok = self._send({
             "action": "register",
-            "full_name": full_name,         # server hiện có thể chưa lưu — gửi kèm để sẵn sàng
+            "full_name": full_name,
             "username": username,
             "password": password,
             "email": email
@@ -351,18 +399,42 @@ class ChatClient:
             messagebox.showerror("Lỗi", f"Không nhận được phản hồi: {e}")
 
     def logout(self):
-        if not self.sock:
-            return
-        self._send({"action": "logout"})
-        # Đóng ngay phía client
+        """Đăng xuất êm: gửi logout (nếu có), dừng luồng nhận, đóng socket,
+        xóa state và quay về màn hình đăng nhập — không popup lỗi."""
+        self._shutting_down = True  # chặn mọi popup lỗi từ receiver/_send
         try:
-            self.running = False
-            if self.sock:
-                self.sock.close()
-            self.sock = None
+            # Gửi logout nhẹ nhàng (nếu còn kết nối)
+            with suppress(Exception):
+                if self.sock:
+                    self._send({"action": "logout"})
         finally:
-            messagebox.showinfo("Đăng xuất", "Đã ngắt kết nối")
-            self.root.destroy()
+            # Dừng luồng nhận
+            self.running = False
+            # Chủ động shutdown để cắt recv đang blocking
+            if self.sock:
+                with suppress(Exception):
+                    self.sock.shutdown(socket.SHUT_RDWR)
+                with suppress(Exception):
+                    self.sock.close()
+            self.sock = None
+
+            # Dọn queue tránh message cũ hiện popup
+            with suppress(queue.Empty):
+                while True:
+                    self.incoming.get_nowait()
+
+            # Reset state
+            self.user_id = None
+            self.username = None
+            self.current_room_id = None
+            self.current_dm_user_id = None
+
+            # Quay lại Login UI (không đóng app)
+            self._build_login_ui()
+            messagebox.showinfo("Đăng xuất", "Bạn đã đăng xuất.")
+
+            # Cho phép hiển thị lỗi trở lại cho lần làm việc sau
+            self._shutting_down = False
 
     # ========================= CHAT =========================
     def _on_select_room(self, _):
@@ -409,7 +481,7 @@ class ChatClient:
         if not content:
             return
 
-        # Group chat via room_id — this matches your current server implementation
+        # Group chat via room_id
         if self.current_room_id:
             ok = self._send({
                 "action": "send_message",
@@ -422,7 +494,7 @@ class ChatClient:
                 self.ent_message.delete(0, tk.END)
             return
 
-        # Private chat — requires server-side handler (đã có trong server mình gửi)
+        # Private chat
         if self.current_dm_user_id:
             ok = self._send({
                 "action": "send_private_message",
@@ -441,16 +513,14 @@ class ChatClient:
         if not self.user_id:
             return
         self._send({
-            "action": "receive_message",  # theo server: 'receive_message' để server trả lịch sử messages liên quan
+            "action": "receive_message",
             "user_id": self.user_id
         })
 
     # ========================= ROOMS =========================
     def create_chat_room(self):
         name = self.ent_room_name.get().strip()
-        if not name:
-            return
-        if not self.user_id:
+        if not name or not self.user_id:
             return
         self._send({
             "action": "create_chat_room",
@@ -517,17 +587,44 @@ class ChatClient:
             while True:
                 kind, payload = self.incoming.get_nowait()
                 if kind == "status":
-                    messagebox.showinfo("Server", payload)
+                    # Không hiện popup lỗi khi đang/đã đăng xuất chủ động
+                    if not self._shutting_down:
+                        messagebox.showinfo("Server", payload)
+
                 elif kind == "chat":
-                    self._append_chat(f"[Phòng/Hệ thống]: {payload}")
+                    # payload: {sender_id, content, sent_at, room_id?}
+                    msg = payload
+                    sender_id = msg.get("sender_id")
+                    content = msg.get("content")
+                    sent_at = msg.get("sent_at", "")
+                    room_id = msg.get("room_id")
+                    if room_id:
+                        self._append_chat(f"[{sent_at}] {sender_id} -> Room {room_id}: {content}")
+                    else:
+                        self._append_chat(f"[{sent_at}] {sender_id}: {content}")
+
+                elif kind == "send_result":
+                    msg = payload
+                    if msg.get("ok"):
+                        sent_at = msg.get("sent_at", "")
+                        receiver_id = msg.get("receiver_id")
+                        room_id = msg.get("room_id")
+                        content = msg.get("content", "")
+                        if room_id:
+                            self._append_chat(f"[{sent_at}] Tôi -> Room {room_id}: {content}")
+                        elif receiver_id:
+                            self._append_chat(f"[{sent_at}] Tôi -> User {receiver_id}: {content}")
+
                 elif kind == "rooms":
                     self.lst_rooms.delete(0, tk.END)
                     for room in payload:  # {room_id, room_name}
                         self.lst_rooms.insert(tk.END, f"{room['room_id']} - {room['room_name']}")
+
                 elif kind == "friends":
                     self.lst_friends.delete(0, tk.END)
                     for f in payload:  # {id, username}
                         self.lst_friends.insert(tk.END, f"{f['id']} - {f['username']}")
+
                 elif kind == "history":
                     self.txt_messages.configure(state=tk.NORMAL)
                     self.txt_messages.delete(1.0, tk.END)
@@ -536,14 +633,18 @@ class ChatClient:
                             sender_id = m[1]
                             receiver_id = m[2]
                             content = m[3]
-                            send_at = m[4]
+                            sent_at = m[4]
                         except Exception:
-                            sender_id = m.get('sender_id')
-                            receiver_id = m.get('receiver_id')
-                            content = m.get('content')
-                            send_at = m.get('send_at')
-                        self.txt_messages.insert(tk.END, f"[{send_at}] {sender_id} -> {receiver_id or 'room'}: {content}\n")
+                            sender_id = m.get("sender_id")
+                            receiver_id = m.get("receiver_id")
+                            content = m.get("content")
+                            sent_at = m.get("sent_at")
+                        self.txt_messages.insert(
+                            tk.END,
+                            f"[{sent_at}] {sender_id} -> {receiver_id or 'room'}: {content}\n"
+                        )
                     self.txt_messages.configure(state=tk.DISABLED)
+
         except queue.Empty:
             pass
         finally:
