@@ -134,16 +134,21 @@ def register_user(request, client_socket):
         username = request["username"]
         password = hash_password(request["password"])
         email = request["email"]
+        display_name = request.get("full_name")  # sửa lại đúng biến
 
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
         if cur.fetchone():
             _send_text(client_socket, "Username already exists.")
             return
+        cur.execute("SELECT 1 FROM users WHERE email = %s", (email,))
+        if cur.fetchone():
+            _send_text(client_socket, "Email already registered.")
+            return
 
         cur.execute(
-            "INSERT INTO users (username, password, email, status) VALUES (%s, %s, %s, 'offline')",
-            (username, password, email),
+            "INSERT INTO users (username, password, email, display_name, status) VALUES (%s, %s, %s, %s, %s)",
+            (username, password, email, display_name, "offline"),
         )
         conn.commit()
         _send_text(client_socket, "Registration successful.")
@@ -326,12 +331,13 @@ def create_chat_room(request, client_socket):
         _send_text(client_socket, f"Chat room '{room_name}' created successfully.")
     except Exception as e:
         print("create_chat_room error:", e)
-        _send_text(client_socket, "Create room failed.")
+        # _send_text(client_socket, "Create room failed.")
+        _send_text(client_socket, "Room name already exists.")
     finally:
         _safe_close(cur, conn)
 
 def join_chat_room(request, client_socket):
-    room_id = request.get("room_id")
+    room_id = request.get("room_name")
     user_id = request.get("user_id")
 
     conn = get_connection()
