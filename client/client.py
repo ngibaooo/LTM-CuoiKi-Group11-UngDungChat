@@ -96,19 +96,19 @@ class ChatClient:
         frm_r = ttk.Frame(tab_register)
         frm_r.pack()
 
-        ttk.Label(frm_r, text="Họ tên").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(frm_r, text="Display name").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         self.reg_fullname = ttk.Entry(frm_r, width=32)
         self.reg_fullname.grid(row=0, column=1, padx=6, pady=6)
 
-        ttk.Label(frm_r, text="Username (đăng nhập)").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(frm_r, text="Username").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         self.reg_username = ttk.Entry(frm_r, width=32)
         self.reg_username.grid(row=1, column=1, padx=6, pady=6)
 
-        ttk.Label(frm_r, text="Mật khẩu").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(frm_r, text="Password").grid(row=2, column=0, sticky="w", padx=6, pady=6)
         self.reg_password = ttk.Entry(frm_r, show="*", width=32)
         self.reg_password.grid(row=2, column=1, padx=6, pady=6)
 
-        ttk.Label(frm_r, text="Email (bắt buộc)").grid(row=3, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(frm_r, text="Email (required)").grid(row=3, column=0, sticky="w", padx=6, pady=6)
         self.reg_email = ttk.Entry(frm_r, width=32)
         self.reg_email.grid(row=3, column=1, padx=6, pady=6)
 
@@ -226,6 +226,20 @@ class ChatClient:
         self.ent_accept_sender_name.grid(row=0, column=1, padx=6, pady=6)
         ttk.Button(frm_accept, text="Chấp nhận", command=self.accept_friend_request).grid(row=0, column=2, padx=6, pady=6)
 
+        frm_pending = ttk.LabelFrame(self.tab_friends, text="Lời mời kết bạn đến")
+        frm_pending.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self.lst_friend_requests = tk.Listbox(frm_pending, height=8)
+        self.lst_friend_requests.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        btns_pending = ttk.Frame(frm_pending)
+        btns_pending.pack(pady=4)
+        ttk.Button(btns_pending, text="Tải danh sách",
+           command=self.show_friend_requests).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns_pending, text="Chấp nhận",
+           command=self.accept_selected_request).pack(side=tk.LEFT, padx=4)
+
+
         # --- Tab: Tin nhắn ---
         self.tab_messages = ttk.Frame(self.nb)
         self.nb.add(self.tab_messages, text="Tin nhắn gần đây")
@@ -304,6 +318,8 @@ class ChatClient:
                             self.incoming.put(("rooms", obj["chat_rooms"]))
                         elif "friends" in obj:
                             self.incoming.put(("friends", obj["friends"]))
+                        elif "requests" in obj:
+                            self.incoming.put(("friend_requests", obj["requests"]))
                         else:
                             self.incoming.put(("status", text))
                     else:
@@ -435,6 +451,37 @@ class ChatClient:
             self._shutting_down = False
 
     # ========================= CHAT =========================
+    def show_friend_requests(self):
+     if not self.user_id:
+        return
+     self._send({
+        "action": "show_friend_requests",
+        "user_id": self.user_id
+    })
+     
+    def accept_selected_request(self):
+      sel = self.lst_friend_requests.curselection()
+      if not sel:
+        messagebox.showwarning("Chưa chọn", "Hãy chọn một lời mời trong danh sách")
+        return
+      idx = sel[0]
+      item = self.lst_friend_requests.get(idx)
+      try:
+        uid, name = item.split(" - ", 1)
+      except Exception:
+        messagebox.showwarning("Lỗi", "Dữ liệu không hợp lệ")
+        return
+
+      self._send({
+        "action": "accept_friend_request",
+        "sender_name": name,       # dùng display_name
+        "receiver_id": self.user_id
+    })
+    # refresh lại danh sách sau khi accept
+      self.show_friend_requests()
+
+
+        
     def _on_select_room(self, _):
         sel = self.lst_rooms.curselection()
         if not sel:
@@ -628,6 +675,12 @@ class ChatClient:
                     self.lst_friends.delete(0, tk.END)
                     for f in payload:  # {id, username}
                         self.lst_friends.insert(tk.END, f"{f['id']} - {f.get('username') or f.get('display_name')}")
+
+                elif kind == "friend_requests":
+                    self.lst_friend_requests.delete(0, tk.END)
+                    for r in payload:  # {id, display_name}
+                       self.lst_friend_requests.insert(tk.END, f"{r['id']} - {r['display_name']}")
+
 
                 elif kind == "history":
                     self.txt_messages.configure(state=tk.NORMAL)
