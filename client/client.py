@@ -201,7 +201,7 @@ class ChatClient:
 
         frm_join = ttk.LabelFrame(self.tab_rooms, text="Tham gia phòng")
         frm_join.pack(fill=tk.X, padx=8, pady=8)
-        ttk.Label(frm_join, text="Room ID").grid(row=0, column=0, padx=6, pady=6)
+        ttk.Label(frm_join, text="Tên phòng").grid(row=0, column=0, padx=6, pady=6)
         self.ent_join_room_id = ttk.Entry(frm_join, width=12)
         self.ent_join_room_id.grid(row=0, column=1, padx=6, pady=6)
         ttk.Button(frm_join, text="Tham gia", command=self.join_chat_room).grid(row=0, column=2, padx=6, pady=6)
@@ -213,8 +213,6 @@ class ChatClient:
         frm_add = ttk.LabelFrame(self.tab_friends, text="Kết bạn")
         frm_add.pack(fill=tk.X, padx=8, pady=8)
         ttk.Label(frm_add, text="Người nhận (Tên hiển thị)").grid(row=0, column=0, padx=6, pady=6)
-        # self.ent_add_friend_id = ttk.Entry(frm_add, width=12)
-        # self.ent_add_friend_id.grid(row=0, column=1, padx=6, pady=6)
 
         self.ent_add_friend_name = ttk.Entry(frm_add, width=12)
         self.ent_add_friend_name.grid(row=0, column=1, padx=6, pady=6)
@@ -528,15 +526,26 @@ class ChatClient:
             "creator_id": self.user_id
         })
 
+    # def join_chat_room(self):
+    #     rid_txt = self.ent_join_room_id.get().strip()
+    #     if not rid_txt or not rid_txt.isdigit():
+    #         messagebox.showwarning("Sai dữ liệu", "Room ID phải là số")
+    #         return
+    #     rid = int(rid_txt)
+    #     self._send({
+    #         "action": "join_chat_room",
+    #         "room_id": rid,
+    #         "user_id": self.user_id
+    #     })
+
     def join_chat_room(self):
-        rid_txt = self.ent_join_room_id.get().strip()
-        if not rid_txt or not rid_txt.isdigit():
-            messagebox.showwarning("Sai dữ liệu", "Room ID phải là số")
+        room_name = self.ent_join_room_id.get().strip()
+        if not room_name:
+            messagebox.showwarning("Sai dữ liệu", "Tên phòng không được để trống")
             return
-        rid = int(rid_txt)
         self._send({
             "action": "join_chat_room",
-            "room_id": rid,
+            "room_name": room_name,
             "user_id": self.user_id
         })
 

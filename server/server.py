@@ -336,8 +336,36 @@ def create_chat_room(request, client_socket):
     finally:
         _safe_close(cur, conn)
 
+# def join_chat_room(request, client_socket):
+#     room_id = request.get("room_name")
+#     user_id = request.get("user_id")
+
+#     conn = get_connection()
+#     if not conn:
+#         _send_text(client_socket, "DB connect failed.")
+#         return
+
+#     cur = None
+#     try:
+#         cur = conn.cursor()
+#         cur.execute("SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s", (room_id, user_id))
+#         if cur.fetchone():
+#             _send_text(client_socket, "You are already a member of this room.")
+#             return
+#         cur.execute(
+#             "INSERT INTO room_members (room_id, user_id, role) VALUES (%s, %s, %s)",
+#             (room_id, user_id, "member"),
+#         )
+#         conn.commit()
+#         _send_text(client_socket, f"Successfully joined room {room_id}.")
+#     except Exception as e:
+#         print("join_chat_room error:", e)
+#         _send_text(client_socket, "Join room failed.")
+#     finally:
+#         _safe_close(cur, conn)
+
 def join_chat_room(request, client_socket):
-    room_id = request.get("room_name")
+    room_name = request.get("room_name")
     user_id = request.get("user_id")
 
     conn = get_connection()
@@ -348,21 +376,33 @@ def join_chat_room(request, client_socket):
     cur = None
     try:
         cur = conn.cursor()
+        # Tìm room_id từ room_name
+        cur.execute("SELECT room_id FROM chat_rooms WHERE room_name = %s", (room_name,))
+        row = cur.fetchone()
+        if not row:
+            _send_text(client_socket, f"Room '{room_name}' is not exist.")
+            return
+        room_id = row[0]
+
+        # Kiểm tra xem user đã trong phòng chưa
         cur.execute("SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s", (room_id, user_id))
         if cur.fetchone():
-            _send_text(client_socket, "You are already a member of this room.")
+            _send_text(client_socket, f"You have joined the room '{room_name}' already.")
             return
+
+        # Thêm vào room_members
         cur.execute(
             "INSERT INTO room_members (room_id, user_id, role) VALUES (%s, %s, %s)",
             (room_id, user_id, "member"),
         )
         conn.commit()
-        _send_text(client_socket, f"Successfully joined room {room_id}.")
+        _send_text(client_socket, f"Participate in the room '{room_name}' successfully.")
     except Exception as e:
         print("join_chat_room error:", e)
         _send_text(client_socket, "Join room failed.")
     finally:
         _safe_close(cur, conn)
+
 
 def show_chat_rooms(request, client_socket):
     user_id = request.get("user_id")
