@@ -145,6 +145,14 @@ def register_user(request, client_socket):
         if cur.fetchone():
             _send_text(client_socket, "Email already registered.")
             return
+        cur.execute("SELECT 1 FROM users WHERE username = %s", (username,))
+        if cur.fetchone():
+            _send_text(client_socket, "Username already exists.")
+            return
+        cur.execute("SELECT 1 FROM users WHERE display_name = %s", (display_name,))
+        if cur.fetchone():
+            _send_text(client_socket, "Display name already registered.")
+            return
 
         cur.execute(
             "INSERT INTO users (username, password, email, display_name, status) VALUES (%s, %s, %s, %s, %s)",
@@ -605,6 +613,9 @@ def handle_client(client_socket):
 
             elif action == "show_friends":
                 show_friends(request, client_socket)
+            
+            elif action == "show_friend_requests":
+                show_friend_requests(request, client_socket)
 
             else:
                 _send_text(client_socket, f"Unknown action: {action}")
@@ -628,6 +639,38 @@ def handle_client(client_socket):
             client_socket.close()
         except:
             pass
+
+def show_friend_requests(request, client_socket):
+    user_id = request.get("user_id")
+
+    conn = get_connection()
+    if not conn:
+        _send_json(client_socket, {"requests": []})
+        return
+
+    cur = None
+    try:
+        cur = conn.cursor()
+        # lấy danh sách người đã gửi lời mời tới user_id (pending)
+        cur.execute(
+            """
+            SELECT u.user_id, u.display_name
+            FROM users u
+            JOIN user_relationships ur
+              ON u.user_id = ur.user1_id
+            WHERE ur.user2_id = %s AND ur.status = 'pending'
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        requests = [{"id": r[0], "display_name": r[1]} for r in rows]
+        _send_json(client_socket, {"requests": requests})
+    except Exception as e:
+        print("show_friend_requests error:", e)
+        _send_json(client_socket, {"requests": []})
+    finally:
+        _safe_close(cur, conn)
+
 
 # ------------------ Server bootstrap ------------------
 def start_server():
