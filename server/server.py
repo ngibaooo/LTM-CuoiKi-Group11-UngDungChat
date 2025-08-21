@@ -336,8 +336,36 @@ def create_chat_room(request, client_socket):
     finally:
         _safe_close(cur, conn)
 
+# def join_chat_room(request, client_socket):
+#     room_id = request.get("room_name")
+#     user_id = request.get("user_id")
+
+#     conn = get_connection()
+#     if not conn:
+#         _send_text(client_socket, "DB connect failed.")
+#         return
+
+#     cur = None
+#     try:
+#         cur = conn.cursor()
+#         cur.execute("SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s", (room_id, user_id))
+#         if cur.fetchone():
+#             _send_text(client_socket, "You are already a member of this room.")
+#             return
+#         cur.execute(
+#             "INSERT INTO room_members (room_id, user_id, role) VALUES (%s, %s, %s)",
+#             (room_id, user_id, "member"),
+#         )
+#         conn.commit()
+#         _send_text(client_socket, f"Successfully joined room {room_id}.")
+#     except Exception as e:
+#         print("join_chat_room error:", e)
+#         _send_text(client_socket, "Join room failed.")
+#     finally:
+#         _safe_close(cur, conn)
+
 def join_chat_room(request, client_socket):
-    room_id = request.get("room_name")
+    room_name = request.get("room_name")
     user_id = request.get("user_id")
 
     conn = get_connection()
@@ -348,21 +376,33 @@ def join_chat_room(request, client_socket):
     cur = None
     try:
         cur = conn.cursor()
+        # Tìm room_id từ room_name
+        cur.execute("SELECT room_id FROM chat_rooms WHERE room_name = %s", (room_name,))
+        row = cur.fetchone()
+        if not row:
+            _send_text(client_socket, f"Room '{room_name}' is not exist.")
+            return
+        room_id = row[0]
+
+        # Kiểm tra xem user đã trong phòng chưa
         cur.execute("SELECT 1 FROM room_members WHERE room_id = %s AND user_id = %s", (room_id, user_id))
         if cur.fetchone():
-            _send_text(client_socket, "You are already a member of this room.")
+            _send_text(client_socket, f"You have joined the room '{room_name}' already.")
             return
+
+        # Thêm vào room_members
         cur.execute(
             "INSERT INTO room_members (room_id, user_id, role) VALUES (%s, %s, %s)",
             (room_id, user_id, "member"),
         )
         conn.commit()
-        _send_text(client_socket, f"Successfully joined room {room_id}.")
+        _send_text(client_socket, f"Participate in the room '{room_name}' successfully.")
     except Exception as e:
         print("join_chat_room error:", e)
         _send_text(client_socket, "Join room failed.")
     finally:
         _safe_close(cur, conn)
+
 
 def show_chat_rooms(request, client_socket):
     user_id = request.get("user_id")
@@ -395,7 +435,7 @@ def show_chat_rooms(request, client_socket):
 
 def send_friend_request(request, client_socket):
     sender_id = request.get("sender_id")
-    receiver_id = request.get("receiver_id")
+    receiver_name = request.get("receiver_name")
 
     conn = get_connection()
     if not conn:
@@ -405,14 +445,20 @@ def send_friend_request(request, client_socket):
     cur = None
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
+        # Tìm user_id theo display_name
+        cur.execute("SELECT user_id FROM users WHERE display_name = %s", (receiver_name,))
+        row = cur.fetchone()
+        if not row:
+            _send_text(client_socket, f"User '{receiver_name}' is not exist.")
+            return
+
+        receiver_id = row[0]
+
+        cur.execute("""
             SELECT 1 FROM user_relationships
             WHERE (user1_id = %s AND user2_id = %s)
                OR (user1_id = %s AND user2_id = %s)
-            """,
-            (sender_id, receiver_id, receiver_id, sender_id),
-        )
+        """, (sender_id, receiver_id, receiver_id, sender_id))
         if cur.fetchone():
             _send_text(client_socket, "Friend request already sent or already friends.")
             return
@@ -429,8 +475,9 @@ def send_friend_request(request, client_socket):
     finally:
         _safe_close(cur, conn)
 
+
 def accept_friend_request(request, client_socket):
-    sender_id = request.get("sender_id")
+    sender_name = request.get("sender_name")
     receiver_id = request.get("receiver_id")
 
     conn = get_connection()
@@ -441,8 +488,18 @@ def accept_friend_request(request, client_socket):
     cur = None
     try:
         cur = conn.cursor()
+        # Tìm user_id theo display_name
+        cur.execute("SELECT user_id FROM users WHERE display_name = %s", (sender_name,))
+        row = cur.fetchone()
+        if not row:
+            _send_text(client_socket, f"User '{sender_name}' is not exist.")
+            return
+
+        sender_id = row[0]
+
         cur.execute(
-            "UPDATE user_relationships SET status = 'accepted' WHERE user1_id = %s AND user2_id = %s AND status = 'pending'",
+            "UPDATE user_relationships SET status = 'accepted' "
+            "WHERE user1_id = %s AND user2_id = %s AND status = 'pending'",
             (sender_id, receiver_id),
         )
         conn.commit()
@@ -452,6 +509,7 @@ def accept_friend_request(request, client_socket):
         _send_text(client_socket, "Accept friend request failed.")
     finally:
         _safe_close(cur, conn)
+
 
 def show_friends(request, client_socket):
     user_id = request.get("user_id")
@@ -464,22 +522,24 @@ def show_friends(request, client_socket):
     cur = None
     try        :
         cur = conn.cursor()
+
         cur.execute(
             """
-            SELECT u.user_id, u.username
+            SELECT u.user_id, u.display_name
             FROM users u
             JOIN user_relationships ur
-              ON (
+            ON (
                 (u.user_id = ur.user2_id AND ur.user1_id = %s)
-              OR (u.user_id = ur.user1_id AND ur.user2_id = %s)
-              )
+            OR (u.user_id = ur.user1_id AND ur.user2_id = %s)
+            )
             WHERE ur.status = 'accepted'
             """,
             (user_id, user_id),
         )
         rows = cur.fetchall()
-        friends = [{"id": r[0], "username": r[1]} for r in rows]
+        friends = [{"id": r[0], "display_name": r[1]} for r in rows]
         _send_json(client_socket, {"friends": friends})
+
     except Exception as e:
         print("show_friends error:", e)
         _send_json(client_socket, {"friends": []})
@@ -545,6 +605,9 @@ def handle_client(client_socket):
 
             elif action == "show_friends":
                 show_friends(request, client_socket)
+            
+            elif action == "show_friend_requests":
+                show_friend_requests(request, client_socket)
 
             else:
                 _send_text(client_socket, f"Unknown action: {action}")
@@ -568,6 +631,38 @@ def handle_client(client_socket):
             client_socket.close()
         except:
             pass
+
+def show_friend_requests(request, client_socket):
+    user_id = request.get("user_id")
+
+    conn = get_connection()
+    if not conn:
+        _send_json(client_socket, {"requests": []})
+        return
+
+    cur = None
+    try:
+        cur = conn.cursor()
+        # lấy danh sách người đã gửi lời mời tới user_id (pending)
+        cur.execute(
+            """
+            SELECT u.user_id, u.display_name
+            FROM users u
+            JOIN user_relationships ur
+              ON u.user_id = ur.user1_id
+            WHERE ur.user2_id = %s AND ur.status = 'pending'
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        requests = [{"id": r[0], "display_name": r[1]} for r in rows]
+        _send_json(client_socket, {"requests": requests})
+    except Exception as e:
+        print("show_friend_requests error:", e)
+        _send_json(client_socket, {"requests": []})
+    finally:
+        _safe_close(cur, conn)
+
 
 # ------------------ Server bootstrap ------------------
 def start_server():
