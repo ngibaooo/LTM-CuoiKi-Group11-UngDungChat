@@ -66,7 +66,7 @@ class ChatClient:
         self.login_frame = ttk.Frame(self.root, padding=16)
         self.login_frame.pack(fill=tk.BOTH, expand=True)
 
-        title = ttk.Label(self.login_frame, text="Chào mừng 👋", font=("Segoe UI", 18, "bold"))
+        title = ttk.Label(self.login_frame, text="Chào mừng 👋", font=("Segoe UI, Helvetica, Arial", 18, "bold"))
         title.pack(pady=(0, 12))
 
         self.auth_nb = ttk.Notebook(self.login_frame)
@@ -153,7 +153,7 @@ class ChatClient:
         frm_friend_actions = ttk.Frame(left); frm_friend_actions.pack(fill=tk.X, pady=6)
         ttk.Button(frm_friend_actions, text="Tải bạn bè", command=self.show_friends).pack(side=tk.LEFT, padx=3)
 
-        # Chat area (phải) dùng chung cho: Room hoặc DM (không mở cửa sổ/tab mới)
+        # Chat area (phải) dùng chung (không mở tab/cửa sổ mới)
         header = ttk.Frame(right); header.pack(fill=tk.X)
         self.lbl_chat_target = ttk.Label(header, text="Chưa chọn phòng / người để chat")
         self.lbl_chat_target.pack(side=tk.LEFT)
@@ -226,27 +226,23 @@ class ChatClient:
     # ========================= NETWORK =========================
     def connect_server(self):
         if self.sock:
-            try:
-                self.lbl_status.config(text=f"Đã kết nối tới {HOST}:{PORT}")
-            except Exception:
-                pass
             messagebox.showinfo("Thông báo", "Đã kết nối rồi")
             return
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((HOST, PORT))
-            if hasattr(self, "lbl_status"):
-                self.lbl_status.config(text=f"Đã kết nối tới {HOST}:{PORT}")
         except Exception as e:
             self.sock = None
             messagebox.showerror("Lỗi", f"Không thể kết nối server: {e}")
 
     def _send(self, payload: dict):
+        """Gửi 1 JSON + newline; dùng sendall để đảm bảo gửi hết."""
         if not self.sock:
             messagebox.showwarning("Chưa kết nối", "Hãy kết nối tới server trước")
             return False
         try:
-            self.sock.send(json.dumps(payload).encode())
+            wire = json.dumps(payload, ensure_ascii=False) + "\n"
+            self.sock.sendall(wire.encode("utf-8"))
             return True
         except Exception as e:
             if not self._shutting_down:
@@ -260,7 +256,23 @@ class ChatClient:
         self.receiver_thread = threading.Thread(target=self._receiver_loop, daemon=True)
         self.receiver_thread.start()
 
+    def _recv_line_once(self) -> str:
+        """Đọc 1 dòng (kết thúc bằng \\n) đồng bộ – dùng cho login/register."""
+        buf = b""
+        while b"\n" not in buf:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        line = buf.decode("utf-8", errors="ignore")
+        # chỉ lấy tới newline đầu
+        if "\n" in line:
+            line = line.split("\n", 1)[0]
+        return line
+
     def _receiver_loop(self):
+        """Đọc stream theo dòng: mỗi dòng là 1 JSON hoặc text."""
+        buffer = ""
         while self.running:
             try:
                 data = self.sock.recv(4096)
@@ -269,38 +281,45 @@ class ChatClient:
                         self.incoming.put(("status", "Mất kết nối từ server"))
                     break
 
-                text = data.decode(errors="ignore")
-                try:
-                    obj = json.loads(text)
+                buffer += data.decode("utf-8", errors="ignore")
 
-                    if isinstance(obj, list):
-                        self.incoming.put(("history", obj))
+                # Xử lý từng dòng
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
 
-                    elif isinstance(obj, dict):
-                        action = obj.get("action")
-                        if action == "receive_message":
-                            self.incoming.put(("chat", obj))
-                        elif action in ("send_message_result", "send_private_result"):
-                            self.incoming.put(("send_result", obj))
-                        elif action == "presence_update":
-                            self.incoming.put(("presence", obj))
-                        elif action == "dm_history":
-                            self.incoming.put(("dm_history", obj))
-                        elif "chat_rooms" in obj:
-                            self.incoming.put(("rooms", obj["chat_rooms"]))
-                        elif "friends" in obj:
-                            self.incoming.put(("friends", obj["friends"]))
-                        elif "requests" in obj:
-                            self.incoming.put(("friend_requests", obj["requests"]))
-                        elif action == "friend_request":
-                            self.incoming.put(("friend_request_notify", obj))
+                        if isinstance(obj, list):
+                            self.incoming.put(("history", obj))
+
+                        elif isinstance(obj, dict):
+                            action = obj.get("action")
+                            if action == "receive_message":
+                                self.incoming.put(("chat", obj))
+                            elif action in ("send_message_result", "send_private_result"):
+                                self.incoming.put(("send_result", obj))
+                            elif action == "presence_update":
+                                self.incoming.put(("presence", obj))
+                            elif action == "dm_history":
+                                self.incoming.put(("dm_history", obj))
+                            elif "chat_rooms" in obj:
+                                self.incoming.put(("rooms", obj["chat_rooms"]))
+                            elif "friends" in obj:
+                                self.incoming.put(("friends", obj["friends"]))
+                            elif "requests" in obj:
+                                self.incoming.put(("friend_requests", obj["requests"]))
+                            elif action == "friend_request":
+                                self.incoming.put(("friend_request_notify", obj))
+                            else:
+                                self.incoming.put(("status", line))
                         else:
-                            self.incoming.put(("status", text))
-                    else:
-                        self.incoming.put(("status", text))
+                            self.incoming.put(("status", line))
 
-                except json.JSONDecodeError:
-                    self.incoming.put(("status", text))
+                    except json.JSONDecodeError:
+                        # server có thể gửi text thuần (ví dụ thông báo)
+                        self.incoming.put(("status", line))
 
             except Exception as e:
                 if not self._shutting_down:
@@ -327,16 +346,15 @@ class ChatClient:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập đủ username, mật khẩu và email")
             return
 
-        ok = self._send({
+        if self._send({
             "action": "register",
             "full_name": full_name,
             "username": username,
             "password": password,
             "email": email
-        })
-        if ok:
+        }):
             try:
-                resp = self.sock.recv(4096).decode()
+                resp = self._recv_line_once()  # server gửi text có \n
                 messagebox.showinfo("Phản hồi", resp)
             except Exception as e:
                 messagebox.showerror("Lỗi", f"Không nhận được phản hồi: {e}")
@@ -351,10 +369,13 @@ class ChatClient:
         if not username or not password:
             messagebox.showwarning("Thiếu dữ liệu", "Nhập đủ username và password")
             return
+
         if not self._send({"action": "login", "username": username, "password": password}):
             return
+
         try:
-            resp_raw = self.sock.recv(4096).decode()
+            # đọc 1 dòng JSON
+            resp_raw = self._recv_line_once()
             try:
                 resp = json.loads(resp_raw)
             except json.JSONDecodeError:
@@ -610,7 +631,8 @@ class ChatClient:
                             self._append_to_chat(f"[{sent_at}] {sender_id} -> Room {room_id}: {content}")
                     else:
                         # DM
-                        line = f"[{sent_at}] {sender_id}: {content}"
+                        name = self.friend_map.get(sender_id, sender_id)
+                        line = f"[{sent_at}] {name}: {content}"
                         self.dm_buffers.setdefault(sender_id, []).append(line)
                         if self.current_dm_user_id == sender_id:
                             self._append_to_chat(line)
@@ -641,10 +663,13 @@ class ChatClient:
 
                 elif kind == "friends":
                     self.friends = payload or []
-                    self.friend_map = {f["id"]: (f.get("display_name") or f.get("username") or f"id={f['id']}") for f in self.friends}
+                    # build friend_map + presence
+                    self.friend_map = {}
                     for f in self.friends:
-                        self.presence[f["id"]] = (f.get("status") or "offline")
-                        self.unread.setdefault(f["id"], 0)
+                        fid = f["id"]
+                        self.friend_map[fid] = f.get("display_name") or f.get("username") or f"id={fid}"
+                        self.presence[fid] = (f.get("status") or "offline")
+                        self.unread.setdefault(fid, 0)
                     self._render_friend_list()
 
                 elif kind == "friend_requests":
@@ -692,7 +717,8 @@ class ChatClient:
                         if s == self.user_id:
                             lines.append(f"[{t}] Tôi -> {self.friend_map.get(peer, peer)}: {c}")
                         else:
-                            lines.append(f"[{t}] {s}: {c}")
+                            name = self.friend_map.get(s, s)
+                            lines.append(f"[{t}] {name}: {c}")
                     self.dm_buffers[peer] = lines
                     if self.current_dm_user_id == peer:
                         self._clear_chat_area()
