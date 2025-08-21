@@ -24,14 +24,16 @@ def _safe_close(cur=None, conn=None):
         pass
 
 def _send_text(client_socket, text: str):
+    """Gửi text có newline (framing theo dòng)."""
     try:
-        client_socket.send(text.encode())
+        client_socket.sendall((text + "\n").encode("utf-8"))
     except:
         pass
 
 def _send_json(client_socket, obj: dict):
+    """Gửi JSON + newline (framing theo dòng)."""
     try:
-        client_socket.send(json.dumps(obj).encode())
+        client_socket.sendall((json.dumps(obj) + "\n").encode("utf-8"))
     except:
         pass
 
@@ -296,7 +298,7 @@ def send_message(request, client_socket):
         _safe_close(cur, conn)
 
 def receive_messages(request, client_socket):
-    """Lịch sử chung (giữ nguyên): DM đến mình + các phòng của mình."""
+    """Lịch sử chung (DM đến mình + các phòng của mình)."""
     user_id = request.get("user_id")
 
     conn = get_connection()
@@ -622,70 +624,78 @@ def show_friends(request, client_socket):
 def handle_client(client_socket):
     user_id = None
     try:
+        buffer = ""
         while True:
-            data = client_socket.recv(4096).decode()
-            if not data:
+            chunk = client_socket.recv(4096).decode("utf-8", errors="ignore")
+            if not chunk:
                 break
-            try:
-                request = json.loads(data)
-            except json.JSONDecodeError:
-                _send_text(client_socket, "Invalid JSON payload.")
-                continue
+            buffer += chunk
 
-            action = request.get("action")
+            # Xử lý theo dòng (1 dòng = 1 JSON)
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    request = json.loads(line)
+                except json.JSONDecodeError:
+                    _send_text(client_socket, "Invalid JSON payload.")
+                    continue
 
-            if action == "register":
-                register_user(request, client_socket)
+                action = request.get("action")
 
-            elif action == "login":
-                user_id = login_user(request, client_socket)
-                if user_id:
-                    user_sockets[user_id] = client_socket
+                if action == "register":
+                    register_user(request, client_socket)
 
-            elif action == "logout":
-                if user_id:
-                    logout_user(user_id)
-                    user_sockets.pop(user_id, None)
-                    _send_text(client_socket, "Logout successful.")
-                    break
+                elif action == "login":
+                    user_id = login_user(request, client_socket)
+                    if user_id:
+                        user_sockets[user_id] = client_socket
+
+                elif action == "logout":
+                    if user_id:
+                        logout_user(user_id)
+                        user_sockets.pop(user_id, None)
+                        _send_text(client_socket, "Logout successful.")
+                        return
+                    else:
+                        _send_text(client_socket, "You are not logged in.")
+
+                elif action == "send_message":
+                    send_message(request, client_socket)
+
+                elif action == "send_private_message":
+                    send_private_message(request, client_socket)
+
+                elif action == "receive_message":
+                    receive_messages(request, client_socket)
+
+                elif action == "get_dm_history":
+                    get_dm_history(request, client_socket)
+
+                elif action == "create_chat_room":
+                    create_chat_room(request, client_socket)
+
+                elif action == "join_chat_room":
+                    join_chat_room(request, client_socket)
+
+                elif action == "show_chat_rooms":
+                    show_chat_rooms(request, client_socket)
+
+                elif action == "send_friend_request":
+                    send_friend_request(request, client_socket)
+
+                elif action == "accept_friend_request":
+                    accept_friend_request(request, client_socket)
+
+                elif action == "show_friends":
+                    show_friends(request, client_socket)
+
+                elif action == "show_friend_requests":
+                    show_friend_requests(request, client_socket)
+
                 else:
-                    _send_text(client_socket, "You are not logged in.")
-
-            elif action == "send_message":
-                send_message(request, client_socket)
-
-            elif action == "send_private_message":
-                send_private_message(request, client_socket)
-
-            elif action == "receive_message":
-                receive_messages(request, client_socket)
-
-            elif action == "get_dm_history":
-                get_dm_history(request, client_socket)
-
-            elif action == "create_chat_room":
-                create_chat_room(request, client_socket)
-
-            elif action == "join_chat_room":
-                join_chat_room(request, client_socket)
-
-            elif action == "show_chat_rooms":
-                show_chat_rooms(request, client_socket)
-
-            elif action == "send_friend_request":
-                send_friend_request(request, client_socket)
-
-            elif action == "accept_friend_request":
-                accept_friend_request(request, client_socket)
-
-            elif action == "show_friends":
-                show_friends(request, client_socket)
-
-            elif action == "show_friend_requests":
-                show_friend_requests(request, client_socket)
-
-            else:
-                _send_text(client_socket, f"Unknown action: {action}")
+                    _send_text(client_socket, f"Unknown action: {action}")
 
     except Exception as e:
         print(f"Error: {e}")
