@@ -83,6 +83,10 @@ def broadcast_message(room_id: int, message: dict, sender_id: int):
     cur = None
     try:
         cur = conn.cursor()
+        cur.execute("SELECT display_name FROM users WHERE user_id = %s", (sender_id,))
+        row = cur.fetchone()
+        sender_name = row[0] if row else f"User {sender_id}"
+
         cur.execute("SELECT user_id FROM room_members WHERE room_id = %s", (room_id,))
         members = cur.fetchall()
         for (uid,) in members:
@@ -90,7 +94,12 @@ def broadcast_message(room_id: int, message: dict, sender_id: int):
                 continue
             sock = user_sockets.get(uid)
             if sock:
-                _send_json(sock, {"action": "receive_message", **message})
+                _send_json(sock, {
+                    "action": "receive_message",
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    **message
+                })
     except Exception as e:
         print("broadcast_message error:", e)
     finally:
@@ -272,9 +281,12 @@ def send_message(request, client_socket):
         cur.execute("SELECT sent_at FROM messages WHERE id = LAST_INSERT_ID()")
         (sent_at,) = cur.fetchone()
         ts = sent_at.isoformat(sep=" ") if hasattr(sent_at, "isoformat") else str(sent_at)
-
+        cur.execute("SELECT display_name FROM users WHERE user_id = %s", (sender_id,))
+        row = cur.fetchone()
+        sender_name = row[0] if row else f"User {sender_id}"
         message_obj = {
             "sender_id": sender_id,
+            "sender_name": sender_name,
             "content": content,
             "sent_at": ts,
             "room_id": room_id
@@ -503,7 +515,6 @@ def send_friend_request(request, client_socket):
         conn.commit()
         _send_text(client_socket, "Friend request sent.")
 
-        # Push realtime tới người nhận nếu đang online
         recv_sock = user_sockets.get(receiver_id)
         if recv_sock:
             cur.execute("SELECT display_name FROM users WHERE user_id = %s", (sender_id,))
@@ -598,7 +609,7 @@ def show_friends(request, client_socket):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT u.user_id, u.display_name, u.status
+            SELECT DISTINCT u.user_id, u.display_name, u.status
             FROM users u
             JOIN user_relationships ur
               ON (
@@ -620,6 +631,136 @@ def show_friends(request, client_socket):
     finally:
         _safe_close(cur, conn)
 
+def get_room_history(request, client_socket):
+    """Trả lịch sử chat của 1 phòng (room_id)."""
+    room_id = request.get("room_id")
+    if not room_id:
+        _send_json(client_socket, {"action": "room_history", "room_id": room_id, "messages": []})
+        return
+
+    conn = get_connection()
+    if not conn:
+        _send_json(client_socket, {"action": "room_history", "room_id": room_id, "messages": []})
+        return
+
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT m.sender_id, u.display_name, m.content, m.sent_at
+            FROM messages m
+            JOIN users u ON m.sender_id = u.user_id
+            WHERE m.room_id = %s
+            ORDER BY m.sent_at ASC
+            LIMIT 300
+            """,
+            (room_id,)
+        )
+        rows = cur.fetchall()
+        out = []
+        for s, name, c, t in rows:
+            ts = t.isoformat(sep=" ") if hasattr(t, "isoformat") else str(t)
+            out.append({"sender_id": s, "sender_name": name, "content": c, "sent_at": ts})
+        _send_json(client_socket, {"action": "room_history", "room_id": room_id, "messages": out})
+    except Exception as e:
+        print("get_room_history error:", e)
+        _send_json(client_socket, {"action": "room_history", "room_id": room_id, "messages": []})
+    finally:
+        _safe_close(cur, conn)
+
+def remove_friend(request, client_socket):
+    """
+    XÓA BẠN: dùng DELETE hoàn toàn (tránh đụng ENUM status).
+    - Xóa mọi quan hệ giữa 2 user (dù pending hay accepted).
+    - Nếu không có gì để xóa -> not_friends.
+    - Gửi notify cho phía còn lại nếu đang online.
+    """
+    me = request.get("user_id")
+    fid = request.get("friend_id") or request.get("peer_id")
+    if not me or not fid:
+        _send_json(client_socket, {"action": "remove_friend_result", "ok": False, "error": "missing_params"})
+        return
+
+    conn = get_connection()
+    if not conn:
+        _send_json(client_socket, {"action": "remove_friend_result", "ok": False, "error": "db_connect_failed"})
+        return
+
+    cur = None
+    try:
+        cur = conn.cursor()
+
+        # Kiểm tra có quan hệ không
+        cur.execute(
+            """
+            SELECT 1 FROM user_relationships
+             WHERE (user1_id=%s AND user2_id=%s) OR (user1_id=%s AND user2_id=%s)
+            """,
+            (me, fid, fid, me)
+        )
+        if not cur.fetchone():
+            _send_json(client_socket, {"action": "remove_friend_result", "ok": False, "error": "not_friends"})
+            return
+
+        # Xóa
+        cur.execute(
+            """
+            DELETE FROM user_relationships
+             WHERE (user1_id=%s AND user2_id=%s) OR (user1_id=%s AND user2_id=%s)
+            """,
+            (me, fid, fid, me)
+        )
+        affected = cur.rowcount
+        conn.commit()
+
+        if affected == 0:
+            _send_json(client_socket, {"action": "remove_friend_result", "ok": False, "error": "not_friends"})
+            return
+
+        _send_json(client_socket, {"action": "remove_friend_result", "ok": True, "friend_id": fid})
+
+        # Thông báo cho đầu kia để họ tự làm tươi UI
+        other_sock = user_sockets.get(fid)
+        if other_sock:
+            _send_json(other_sock, {"action": "friend_removed_notify", "by_user_id": me})
+
+    except Exception as e:
+        print("remove_friend error:", e)
+        _send_json(client_socket, {"action": "remove_friend_result", "ok": False, "error": "exception"})
+    finally:
+        _safe_close(cur, conn)
+
+def leave_chat_room(request, client_socket):
+    """Rời phòng: xóa khỏi room_members."""
+    user_id = request.get("user_id")
+    room_id = request.get("room_id")
+    if not user_id or not room_id:
+        _send_json(client_socket, {"action": "leave_room_result", "ok": False, "error": "missing_params"})
+        return
+
+    conn = get_connection()
+    if not conn:
+        _send_json(client_socket, {"action": "leave_room_result", "ok": False, "error": "db_connect_failed"})
+        return
+
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM room_members WHERE room_id = %s AND user_id = %s", (room_id, user_id))
+        conn.commit()
+        if cur.rowcount == 0:
+            _send_json(client_socket, {"action": "leave_room_result", "ok": False, "error": "not_member", "room_id": room_id})
+            return
+
+        _send_json(client_socket, {"action": "leave_room_result", "ok": True, "room_id": room_id})
+
+    except Exception as e:
+        print("leave_chat_room error:", e)
+        _send_json(client_socket, {"action": "leave_room_result", "ok": False, "error": "exception"})
+    finally:
+        _safe_close(cur, conn)
+
 # ------------------ Client loop ------------------
 def handle_client(client_socket):
     user_id = None
@@ -631,7 +772,6 @@ def handle_client(client_socket):
                 break
             buffer += chunk
 
-            # Xử lý theo dòng (1 dòng = 1 JSON)
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 if not line.strip():
@@ -691,8 +831,20 @@ def handle_client(client_socket):
                 elif action == "show_friends":
                     show_friends(request, client_socket)
 
+                elif action == "get_room_history":
+                    get_room_history(request, client_socket)
+
                 elif action == "show_friend_requests":
                     show_friend_requests(request, client_socket)
+
+                elif action == "remove_friend":
+                    remove_friend(request, client_socket)
+
+                elif action == "leave_chat_room":
+                    leave_chat_room(request, client_socket)
+
+                elif action == "delete_friend":   # alias cũ
+                    remove_friend(request, client_socket)
 
                 else:
                     _send_text(client_socket, f"Unknown action: {action}")
