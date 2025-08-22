@@ -33,7 +33,7 @@ class ChatClient:
         self.presence = {}                 # id -> 'online'/'offline'
         self.unread = {}                   # id -> int (tin nhắn chưa đọc)
 
-        # Local DM buffers: peer_id -> list[str] (dùng để render nhanh khi đổi người)
+        # Local DM buffers: peer_id -> list[str]
         self.dm_buffers = {}
 
         # UI holders
@@ -135,25 +135,29 @@ class ChatClient:
 
         # Rooms
         ttk.Label(left, text="Phòng của tôi").pack(anchor="w")
-        self.lst_rooms = tk.Listbox(left, height=10)
+        # Fix mất selection khi bấm nút: exportselection=False
+        self.lst_rooms = tk.Listbox(left, height=10, exportselection=False)
         self.lst_rooms.pack(fill=tk.Y, pady=4)
         self.lst_rooms.bind("<<ListboxSelect>>", self._on_select_room)
 
         frm_room_actions = ttk.Frame(left); frm_room_actions.pack(fill=tk.X, pady=6)
         ttk.Button(frm_room_actions, text="Tải phòng", command=self.show_chat_rooms).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frm_room_actions, text="Rời phòng", command=self.leave_selected_room).pack(side=tk.LEFT, padx=3)
 
         ttk.Separator(left, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
 
         # Friends + presence + unread
         ttk.Label(left, text="Bạn bè").pack(anchor="w")
-        self.lst_friends = tk.Listbox(left, height=14)
+        # Fix mất selection khi bấm nút: exportselection=False
+        self.lst_friends = tk.Listbox(left, height=14, exportselection=False)
         self.lst_friends.pack(fill=tk.Y, pady=4)
         self.lst_friends.bind("<<ListboxSelect>>", self._on_select_friend)
 
         frm_friend_actions = ttk.Frame(left); frm_friend_actions.pack(fill=tk.X, pady=6)
         ttk.Button(frm_friend_actions, text="Tải bạn bè", command=self.show_friends).pack(side=tk.LEFT, padx=3)
+        ttk.Button(frm_friend_actions, text="Xóa bạn", command=self.remove_selected_friend).pack(side=tk.LEFT, padx=3)
 
-        # Chat area (phải) dùng chung (không mở tab/cửa sổ mới)
+        # Chat area (phải)
         header = ttk.Frame(right); header.pack(fill=tk.X)
         self.lbl_chat_target = ttk.Label(header, text="Chưa chọn phòng / người để chat")
         self.lbl_chat_target.pack(side=tk.LEFT)
@@ -200,7 +204,8 @@ class ChatClient:
         frm_pending = ttk.LabelFrame(self.tab_friends, text="Lời mời kết bạn đến")
         frm_pending.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        self.lst_friend_requests = tk.Listbox(frm_pending, height=8)
+        # Fix mất selection: exportselection=False
+        self.lst_friend_requests = tk.Listbox(frm_pending, height=8, exportselection=False)
         self.lst_friend_requests.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
 
         btns_pending = ttk.Frame(frm_pending); btns_pending.pack(pady=4)
@@ -265,7 +270,6 @@ class ChatClient:
                 break
             buf += chunk
         line = buf.decode("utf-8", errors="ignore")
-        # chỉ lấy tới newline đầu
         if "\n" in line:
             line = line.split("\n", 1)[0]
         return line
@@ -302,6 +306,8 @@ class ChatClient:
                                 self.incoming.put(("send_result", obj))
                             elif action == "presence_update":
                                 self.incoming.put(("presence", obj))
+                            elif action == "room_history":
+                                self.incoming.put(("room_history", obj))
                             elif action == "dm_history":
                                 self.incoming.put(("dm_history", obj))
                             elif "chat_rooms" in obj:
@@ -312,13 +318,18 @@ class ChatClient:
                                 self.incoming.put(("friend_requests", obj["requests"]))
                             elif action == "friend_request":
                                 self.incoming.put(("friend_request_notify", obj))
+                            elif action == "remove_friend_result":
+                                self.incoming.put(("remove_friend_result", obj))
+                            elif action == "leave_room_result":
+                                self.incoming.put(("leave_room_result", obj))
+                            elif action == "friend_removed_notify":
+                                self.incoming.put(("friend_removed_notify", obj))
                             else:
                                 self.incoming.put(("status", line))
                         else:
                             self.incoming.put(("status", line))
 
                     except json.JSONDecodeError:
-                        # server có thể gửi text thuần (ví dụ thông báo)
                         self.incoming.put(("status", line))
 
             except Exception as e:
@@ -354,7 +365,7 @@ class ChatClient:
             "email": email
         }):
             try:
-                resp = self._recv_line_once()  # server gửi text có \n
+                resp = self._recv_line_once()
                 messagebox.showinfo("Phản hồi", resp)
             except Exception as e:
                 messagebox.showerror("Lỗi", f"Không nhận được phản hồi: {e}")
@@ -374,7 +385,6 @@ class ChatClient:
             return
 
         try:
-            # đọc 1 dòng JSON
             resp_raw = self._recv_line_once()
             try:
                 resp = json.loads(resp_raw)
@@ -431,10 +441,11 @@ class ChatClient:
             messagebox.showinfo("Đăng xuất", "Bạn đã đăng xuất.")
             self._shutting_down = False
 
-    # ========================= CHAT (ROOM / DM trong khung phải) =========================
+    # ========================= CHAT (ROOM / DM) =========================
     def _on_select_room(self, _):
         sel = self.lst_rooms.curselection()
-        if not sel: return
+        if not sel:
+            return
         item = self.lst_rooms.get(sel[0])
         try:
             room_id = int(item.split(" - ")[0])
@@ -442,38 +453,34 @@ class ChatClient:
             room_id = None
         self.current_room_id = room_id
         self.current_dm_user_id = None
-        self._render_room_header(item)
+        self.lbl_chat_target.config(text=f"Chat phòng: {item}")
         self._clear_chat_area()
+        if room_id:
+            self._send({"action": "get_room_history", "room_id": room_id})
 
     def _on_select_friend(self, _):
         sel = self.lst_friends.curselection()
-        if not sel: return
+        if not sel:
+            return
         item = self.lst_friends.get(sel[0])
-        # Format: "<id> - <name> [ON/OFF] (n?)"
         try:
             uid = int(item.split(" - ")[0])
         except Exception:
             return
         self.current_dm_user_id = uid
         self.current_room_id = None
-        # reset unread cho người này
         if uid in self.unread:
             self.unread[uid] = 0
             self._render_friend_list()
-        # header
         name = self.friend_map.get(uid, f"User {uid}")
         sta = (self.presence.get(uid, "offline").lower() == "online")
         self.lbl_chat_target.config(text=f"Chat riêng với: {name} ({'ON' if sta else 'OFF'})")
-        # hiển thị buffer nếu có, ngược lại xin server trả lịch sử
         self._clear_chat_area()
         if uid in self.dm_buffers:
             for line in self.dm_buffers[uid]:
                 self._append_to_chat(line)
         else:
             self._send({"action": "get_dm_history", "user_id": self.user_id, "peer_id": uid})
-
-    def _render_room_header(self, item_text):
-        self.lbl_chat_target.config(text=f"Chat phòng: {item_text}")
 
     def _clear_chat_area(self):
         self.txt_chat.configure(state=tk.NORMAL)
@@ -494,7 +501,6 @@ class ChatClient:
         if not content:
             return
 
-        # Group chat
         if self.current_room_id:
             ok = self._send({
                 "action": "send_message",
@@ -507,7 +513,6 @@ class ChatClient:
                 self.ent_message.delete(0, tk.END)
             return
 
-        # Private DM (trong cùng khung)
         if self.current_dm_user_id:
             peer = self.current_dm_user_id
             ok = self._send({
@@ -549,6 +554,27 @@ class ChatClient:
             return
         self._send({"action": "show_chat_rooms", "user_id": self.user_id})
 
+    def leave_selected_room(self):
+        sel = self.lst_rooms.curselection()
+        room_id = None
+        item = None
+        if sel:
+            item = self.lst_rooms.get(sel[0])
+            try:
+                room_id = int(item.split(" - ")[0])
+            except Exception:
+                room_id = None
+        # Fallback nếu Listbox mất selection
+        if room_id is None:
+            room_id = self.current_room_id
+            item = f"{room_id}" if room_id else None
+        if not room_id:
+            messagebox.showwarning("Chưa chọn", "Chọn phòng trước khi rời.")
+            return
+        if not messagebox.askyesno("Xác nhận", f"Bạn chắc muốn rời phòng {item}?"):
+            return
+        self._send({"action": "leave_chat_room", "user_id": self.user_id, "room_id": room_id})
+
     # ========================= FRIENDS / REQUESTS =========================
     def send_friend_request(self):
         name_txt = self.ent_add_friend_name.get().strip()
@@ -565,7 +591,8 @@ class ChatClient:
         self._send({"action": "accept_friend_request", "sender_name": name_txt, "receiver_id": self.user_id})
 
     def show_friend_requests(self):
-        if not self.user_id: return
+        if not self.user_id:
+            return
         self._send({"action": "show_friend_requests", "user_id": self.user_id})
 
     def accept_selected_request(self):
@@ -589,6 +616,31 @@ class ChatClient:
         if not self.user_id:
             return
         self._send({"action": "show_friends", "user_id": self.user_id})
+
+    def remove_selected_friend(self):
+        # Cố lấy từ selection
+        sel = self.lst_friends.curselection()
+        fid = None
+        item = None
+        if sel:
+            item = self.lst_friends.get(sel[0])
+            try:
+                fid = int(item.split(" - ")[0])
+            except Exception:
+                fid = None
+        # Fallback: nếu bấm nút làm mất selection, dùng người đang mở DM
+        if fid is None:
+            fid = self.current_dm_user_id
+            if fid is not None:
+                name = self.friend_map.get(fid, f"id={fid}")
+                item = f"{fid} - {name}"
+        if not fid:
+            messagebox.showwarning("Chưa chọn", "Chọn một người bạn bên trái trước khi xóa.")
+            return
+        name = self.friend_map.get(fid, f"id={fid}")
+        if not messagebox.askyesno("Xác nhận", f"Xóa bạn với '{name}'?"):
+            return
+        self._send({"action": "remove_friend", "user_id": self.user_id, "friend_id": fid})
 
     # ========================= RENDER LISTS =========================
     def _render_friend_list(self):
@@ -618,19 +670,17 @@ class ChatClient:
                         messagebox.showinfo("Server", payload)
 
                 elif kind == "chat":
-                    # payload: {sender_id, receiver_id, content, sent_at, room_id?}
                     msg = payload
                     sender_id = msg.get("sender_id")
+                    sender_name = msg.get("sender_name", sender_id)
                     content = msg.get("content")
                     sent_at = msg.get("sent_at", "")
                     room_id = msg.get("room_id")
 
                     if room_id:
-                        # group
                         if self.current_room_id == room_id:
-                            self._append_to_chat(f"[{sent_at}] {sender_id} -> Room {room_id}: {content}")
+                            self._append_to_chat(f"[{sent_at}] {sender_name}: {content}")
                     else:
-                        # DM
                         name = self.friend_map.get(sender_id, sender_id)
                         line = f"[{sent_at}] {name}: {content}"
                         self.dm_buffers.setdefault(sender_id, []).append(line)
@@ -663,7 +713,6 @@ class ChatClient:
 
                 elif kind == "friends":
                     self.friends = payload or []
-                    # build friend_map + presence
                     self.friend_map = {}
                     for f in self.friends:
                         fid = f["id"]
@@ -681,7 +730,6 @@ class ChatClient:
                     self.show_friend_requests()
 
                 elif kind == "history":
-                    # tab "Tin nhắn gần đây"
                     self.txt_messages.configure(state=tk.NORMAL)
                     self.txt_messages.delete(1.0, tk.END)
                     for m in payload:
@@ -707,6 +755,21 @@ class ChatClient:
                                 break
                         self._render_friend_list()
 
+                elif kind == "room_history":
+                    room_id = payload.get("room_id")
+                    msgs = payload.get("messages", [])
+                    if self.current_room_id == room_id:
+                        self._clear_chat_area()
+                        for m in msgs:
+                            sid = m.get("sender_id")
+                            sname = m.get("sender_name", sid)
+                            c = m.get("content")
+                            t = m.get("sent_at")
+                            if sid == self.user_id:
+                                self._append_to_chat(f"[{t}] Tôi: {c}")
+                            else:
+                                self._append_to_chat(f"[{t}] {sname}: {c}")
+
                 elif kind == "dm_history":
                     peer = payload.get("peer_id")
                     msgs = payload.get("messages", [])
@@ -724,6 +787,50 @@ class ChatClient:
                         self._clear_chat_area()
                         for ln in lines:
                             self._append_to_chat(ln)
+
+                elif kind == "remove_friend_result":
+                    if payload.get("ok"):
+                        fid = payload.get("friend_id")
+                        if fid is not None:
+                            self.friend_map.pop(fid, None)
+                            self.unread.pop(fid, None)
+                            self.dm_buffers.pop(fid, None)
+                            self.friends = [f for f in self.friends if f["id"] != fid]
+                            if self.current_dm_user_id == fid:
+                                self.current_dm_user_id = None
+                                self.lbl_chat_target.config(text="Chưa chọn phòng / người để chat")
+                                self._clear_chat_area()
+                        self._render_friend_list()
+                        messagebox.showinfo("Xóa bạn", "Đã xóa bạn thành công.")
+                    else:
+                        messagebox.showerror("Xóa bạn", f"Thất bại: {payload.get('error')}")
+                    self.show_friends()
+
+                elif kind == "friend_removed_notify":
+                    by_uid = payload.get("by_user_id")
+                    if by_uid is not None:
+                        self.friend_map.pop(by_uid, None)
+                        self.unread.pop(by_uid, None)
+                        self.dm_buffers.pop(by_uid, None)
+                        self.friends = [f for f in self.friends if f["id"] != by_uid]
+                        if self.current_dm_user_id == by_uid:
+                            self.current_dm_user_id = None
+                            self.lbl_chat_target.config(text="Chưa chọn phòng / người để chat")
+                            self._clear_chat_area()
+                        self._render_friend_list()
+                        self.show_friends()
+
+                elif kind == "leave_room_result":
+                    if payload.get("ok"):
+                        rid = payload.get("room_id")
+                        if self.current_room_id == rid:
+                            self.current_room_id = None
+                            self.lbl_chat_target.config(text="Chưa chọn phòng / người để chat")
+                            self._clear_chat_area()
+                        messagebox.showinfo("Rời phòng", f"Đã rời phòng {rid}.")
+                        self.show_chat_rooms()
+                    else:
+                        messagebox.showerror("Rời phòng", f"Thất bại: {payload.get('error')}")
 
         except queue.Empty:
             pass
